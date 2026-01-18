@@ -5,7 +5,6 @@ Uses hardware-accelerated blitting for 60+ FPS
 """
 
 import pygame
-import pygame.freetype  # Use freetype instead of font module (Python 3.14 compatible)
 import math
 import random
 import time
@@ -343,6 +342,9 @@ class HolographicTree:
 
 def main():
     pygame.init()
+
+    # Import freetype after pygame.init() to avoid circular import on Python 3.14
+    import pygame.freetype
 
     # Get primary display
     info = pygame.display.Info()
