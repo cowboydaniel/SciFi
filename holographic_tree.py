@@ -181,6 +181,64 @@ class HolographicTree:
                     angle_offset=random.uniform(-25, 25)
                 ))
 
+    def _get_leaf_surface(self, size: int) -> tuple[pygame.Surface, tuple[float, float]]:
+        size = max(4, int(size))
+        if size in self.leaf_surfaces:
+            return self.leaf_surfaces[size]
+
+        surf = pygame.Surface((size * 4, size * 4), pygame.SRCALPHA)
+        cx_l, cy_l = size * 2, size * 2
+        body_w = int(size * 1.3)
+        body_h = int(size * 1.9)
+        body_rect = pygame.Rect(0, 0, body_w, body_h)
+        body_rect.center = (cx_l, cy_l + int(size * 0.2))
+        tip_height = int(size * 0.7)
+        tip_top = body_rect.top - tip_height
+        tip_left = body_rect.left + int(body_w * 0.15)
+        tip_right = body_rect.right - int(body_w * 0.15)
+        tip_points = [
+            (cx_l, tip_top),
+            (tip_right, body_rect.top + int(body_h * 0.2)),
+            (tip_left, body_rect.top + int(body_h * 0.2))
+        ]
+
+        # Base volume
+        base_color = (70, 200, 255, 160)
+        mid_color = (110, 235, 255, 190)
+        highlight_color = (190, 255, 255, 210)
+        outline_color = (200, 255, 255, 230)
+
+        pygame.draw.ellipse(surf, base_color, body_rect)
+        pygame.draw.polygon(surf, base_color, tip_points)
+
+        inner_rect = body_rect.inflate(-int(size * 0.3), -int(size * 0.3))
+        pygame.draw.ellipse(surf, mid_color, inner_rect)
+
+        highlight_rect = inner_rect.inflate(-int(size * 0.4), -int(size * 0.4))
+        highlight_rect.center = (highlight_rect.centerx - int(size * 0.2),
+                                 highlight_rect.centery - int(size * 0.2))
+        pygame.draw.ellipse(surf, highlight_color, highlight_rect)
+
+        pygame.draw.ellipse(surf, outline_color, body_rect, 1)
+        pygame.draw.polygon(surf, outline_color, tip_points, 1)
+
+        # Stem
+        stem_length = max(4, int(size * 0.5))
+        stem_start = (cx_l, body_rect.bottom - 1)
+        stem_end = (cx_l, body_rect.bottom + stem_length)
+        pygame.draw.line(surf, outline_color, stem_start, stem_end, max(1, size // 6))
+
+        base_offset = (stem_end[0] - cx_l, stem_end[1] - cy_l)
+        self.leaf_surfaces[size] = (surf, base_offset)
+        return surf, base_offset
+
+    @staticmethod
+    def _rotate_point(x: float, y: float, angle_deg: float) -> tuple[float, float]:
+        rad = math.radians(angle_deg)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        return (x * cos_a - y * sin_a, x * sin_a + y * cos_a)
+
     def _gen_branch(self, parent: int, angle: float, length: float, depth: int, max_d: int, z: float):
         if depth >= max_d or length < 10:
             return
@@ -326,11 +384,13 @@ class HolographicTree:
             color = (0, a, a)
             ew, eh = 420 + i * 60, 40 + i * 10
             rect = pygame.Rect(cx - ew // 2, py - eh // 2, ew, eh)
-            pygame.draw.ellipse(screen, color, rect, 2)
+            pygame.gfxdraw.filled_ellipse(screen, rect.centerx, rect.centery, rect.width // 2, rect.height // 2,
+                                          (0, a // 3, a // 2, 40))
+            pygame.gfxdraw.aaellipse(screen, rect.centerx, rect.centery, rect.width // 2, rect.height // 2, color)
 
         # Tree glow (using thick antialiased lines)
         for b in self.sorted_branches:
-            glow_thick = int(b.thickness + 6)
+            glow_thick = int(b.thickness + 10)
             points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
             for i in range(len(points) - 1):
                 self.draw_thick_aaline(screen, (0, int(80 * f), int(120 * f)),
@@ -349,6 +409,10 @@ class HolographicTree:
             # Draw thick antialiased branch
             points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
             for i in range(len(points) - 1):
+                shadow_offset = 2 + int((1 - zf) * 2)
+                self.draw_thick_aaline(screen, (0, int(40 * f), int(60 * f)),
+                                      points[i][0] + shadow_offset, points[i][1] + shadow_offset,
+                                      points[i + 1][0] + shadow_offset, points[i + 1][1] + shadow_offset, th + 2)
                 self.draw_thick_aaline(screen, (r, g, blue),
                                       points[i][0], points[i][1], points[i + 1][0], points[i + 1][1], th)
 
@@ -385,31 +449,15 @@ class HolographicTree:
             size = int(leaf.size * (0.7 + (branch.z_depth + 1) * 0.15))
             size = max(4, size)
 
-            leaf_surf = pygame.Surface((size * 3, size * 3), pygame.SRCALPHA)
-            cx_l, cy_l = size * 3 // 2, size * 3 // 2
-            body_w = int(size * 1.2)
-            body_h = int(size * 1.8)
-            body_rect = pygame.Rect(0, 0, body_w, body_h)
-            body_rect.center = (cx_l, cy_l + int(size * 0.2))
-            tip_height = int(size * 0.6)
-            tip_top = body_rect.top - tip_height
-            tip_left = body_rect.left + int(body_w * 0.15)
-            tip_right = body_rect.right - int(body_w * 0.15)
-            tip_points = [(cx_l, tip_top), (tip_right, body_rect.top + int(body_h * 0.2)),
-                          (tip_left, body_rect.top + int(body_h * 0.2))]
-            fill_color = (90, 220, 255, int(170 * a))
-            outline_color = (180, 255, 255, int(210 * a))
-            pygame.draw.ellipse(leaf_surf, fill_color, body_rect)
-            pygame.draw.polygon(leaf_surf, fill_color, tip_points)
-            pygame.draw.ellipse(leaf_surf, outline_color, body_rect, 1)
-            pygame.draw.polygon(leaf_surf, outline_color, tip_points, 1)
-            stem_length = max(3, int(size * 0.4))
-            stem_start = (cx_l, body_rect.bottom - 1)
-            stem_end = (cx_l, body_rect.bottom + stem_length)
-            pygame.draw.line(leaf_surf, outline_color, stem_start, stem_end, 1)
-
+            leaf_surf, base_offset = self._get_leaf_surface(size)
             rotated = pygame.transform.rotate(leaf_surf, -angle)
+            base_rot = self._rotate_point(base_offset[0], base_offset[1], -angle)
+            stem_x = x + base_rot[0]
+            stem_y = y + base_rot[1]
+            self.draw_thick_aaline(screen, (120, int(220 * a), 255),
+                                  end_x, end_y, stem_x, stem_y, max(1, size // 6))
             rect = rotated.get_rect(center=(int(x), int(y)))
+            rotated.set_alpha(int(255 * a))
             screen.blit(rotated, rect, special_flags=pygame.BLEND_ADD)
 
         # Particles with cached glow surfaces
@@ -435,27 +483,9 @@ class HolographicTree:
             sz = int(lf.size * (0.8 + (lf.z + 1) * 0.2))
             a = lf.alpha * f
 
-            # Create rotated leaf
-            leaf_surf = pygame.Surface((sz * 3, sz * 3), pygame.SRCALPHA)
-
-            # Leaf shape (teardrop/ellipse)
-            cx_l, cy_l = sz * 3 // 2, sz * 3 // 2
-            body_w = int(sz * 1.2)
-            body_h = int(sz * 1.8)
-            body_rect = pygame.Rect(0, 0, body_w, body_h)
-            body_rect.center = (cx_l, cy_l + int(sz * 0.2))
-            tip_height = int(sz * 0.6)
-            tip_top = body_rect.top - tip_height
-            tip_left = body_rect.left + int(body_w * 0.15)
-            tip_right = body_rect.right - int(body_w * 0.15)
-            tip_points = [(cx_l, tip_top), (tip_right, body_rect.top + int(body_h * 0.2)),
-                          (tip_left, body_rect.top + int(body_h * 0.2))]
-            outline_color = (180, 255, 255, int(200 * a))
-            pygame.draw.ellipse(leaf_surf, outline_color, body_rect, 1)
-            pygame.draw.polygon(leaf_surf, outline_color, tip_points, 1)
-
-            # Rotate and blit
+            leaf_surf, _ = self._get_leaf_surface(sz)
             rotated = pygame.transform.rotate(leaf_surf, -lf.rotation)
+            rotated.set_alpha(int(255 * a))
             rect = rotated.get_rect(center=(int(lf.x), int(lf.y)))
             screen.blit(rotated, rect, special_flags=pygame.BLEND_ADD)
 
