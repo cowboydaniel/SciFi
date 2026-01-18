@@ -131,7 +131,6 @@ class HolographicTree:
         self.branches: List[Branch] = []
         self.falling_leaves: List[FallingLeaf] = []
         self.max_leaves = 18
-        self.leaf_rotation_cache: dict[tuple[int, int], tuple] = {}
         self.leaf_atlas_cols = 4
         self.leaf_atlas_rows = 4
         self.bird_sprite_cols = 4
@@ -163,7 +162,6 @@ class HolographicTree:
 
     def regenerate_tree(self):
         self.branches.clear()
-        self.leaf_rotation_cache.clear()
         self._gen_branch(-1, 90, 180, 0, 9, 0.0)
         self.sorted_branches = sorted(self.branches, key=lambda b: b.z_depth)
         self.tip_indices = [i for i, branch in enumerate(self.branches) if branch.depth >= 6]
@@ -355,19 +353,6 @@ class HolographicTree:
         )
         variance_amount = rng.uniform(0.25, 0.6)
         return atlas_index, uv_offset, uv_scale, color_variance, variance_amount
-
-    def _get_rotated_leaf(self, size: int, angle: float) -> tuple[pygame.Surface, tuple[float, float]]:
-        leaf_surf, base_offset = self._get_leaf_surface(size)
-        angle = angle % 360
-        bucket = int(round(angle / 6)) * 6
-        key = (size, bucket)
-        cached = self.leaf_rotation_cache.get(key)
-        if cached:
-            return cached
-        rotated = pygame.transform.rotate(leaf_surf, -bucket)
-        base_rot = self._rotate_point(base_offset[0], base_offset[1], -bucket)
-        self.leaf_rotation_cache[key] = (rotated, base_rot)
-        return rotated, base_rot
 
     @staticmethod
     def _get_branch_point_and_angle(points: List[tuple], t: float) -> tuple[tuple[float, float], float]:
