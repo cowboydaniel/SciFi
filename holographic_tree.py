@@ -32,6 +32,11 @@ class FallingLeaf:
     wobble_speed: float
     alpha: float
     lifetime: float
+    atlas_index: int
+    uv_offset: tuple[float, float]
+    uv_scale: tuple[float, float]
+    color_variance: tuple[float, float, float]
+    variance_amount: float
 
 
 @dataclass
@@ -65,6 +70,11 @@ class AttachedLeaf:
     side: int
     size: float
     angle_offset: float
+    atlas_index: int
+    uv_offset: tuple[float, float]
+    uv_scale: tuple[float, float]
+    color_variance: tuple[float, float, float]
+    variance_amount: float
 
 
 @dataclass
@@ -122,6 +132,8 @@ class HolographicTree:
         self.falling_leaves: List[FallingLeaf] = []
         self.max_leaves = 18
         self.leaf_rotation_cache: dict[tuple[int, int], tuple] = {}
+        self.leaf_atlas_cols = 4
+        self.leaf_atlas_rows = 4
 
         self.sorted_branches: List[Branch] = []
         self.tip_branches: List[Branch] = []
@@ -157,12 +169,20 @@ class HolographicTree:
         self.attached_leaves = []
         for idx in self.tip_indices:
             for _ in range(random.randint(1, 3)):
+                atlas_index, uv_offset, uv_scale, color_variance, variance_amount = (
+                    self._make_leaf_style(idx + random.random())
+                )
                 self.attached_leaves.append(AttachedLeaf(
                     branch_index=idx,
                     t=random.uniform(0.82, 1.0),
                     side=random.choice([-1, 1]),
                     size=random.uniform(6, 12),
-                    angle_offset=random.uniform(-12, 12)
+                    angle_offset=random.uniform(-12, 12),
+                    atlas_index=atlas_index,
+                    uv_offset=uv_offset,
+                    uv_scale=uv_scale,
+                    color_variance=color_variance,
+                    variance_amount=variance_amount,
                 ))
         self._reset_bird()
 
@@ -315,6 +335,25 @@ class HolographicTree:
         sin_a = math.sin(rad)
         return (x * cos_a - y * sin_a, x * sin_a + y * cos_a)
 
+    def _make_leaf_style(
+        self, seed: float
+    ) -> tuple[int, tuple[float, float], tuple[float, float], tuple[float, float, float], float]:
+        rng = random.Random(seed)
+        atlas_count = max(1, self.leaf_atlas_cols * self.leaf_atlas_rows)
+        atlas_index = rng.randrange(atlas_count)
+        uv_scale = (rng.uniform(0.72, 0.96), rng.uniform(0.72, 0.96))
+        uv_offset = (
+            rng.uniform(0.0, max(0.0, 1.0 - uv_scale[0])),
+            rng.uniform(0.0, max(0.0, 1.0 - uv_scale[1])),
+        )
+        color_variance = (
+            rng.uniform(-0.18, 0.22),
+            rng.uniform(-0.12, 0.16),
+            rng.uniform(-0.2, 0.18),
+        )
+        variance_amount = rng.uniform(0.25, 0.6)
+        return atlas_index, uv_offset, uv_scale, color_variance, variance_amount
+
     def _get_rotated_leaf(self, size: int, angle: float) -> tuple[pygame.Surface, tuple[float, float]]:
         leaf_surf, base_offset = self._get_leaf_surface(size)
         angle = angle % 360
@@ -405,12 +444,16 @@ class HolographicTree:
 
         if len(self.falling_leaves) < self.max_leaves and self.tip_branches and random.random() > 0.988:
             tb = random.choice(self.tip_branches)
+            atlas_index, uv_offset, uv_scale, color_variance, variance_amount = self._make_leaf_style(
+                tb.variation_seed + self.time + random.random()
+            )
             self.falling_leaves.append(FallingLeaf(
                 tb.end_x, tb.end_y, tb.z_depth,
                 random.uniform(-0.4, 0.4), random.uniform(-1.5, -0.5),
                 random.uniform(0, 360), random.uniform(-4, 4),
                 random.uniform(12, 20), random.uniform(0, 6.28),
-                random.uniform(2, 4), 1.0, 0
+                random.uniform(2, 4), 1.0, 0,
+                atlas_index, uv_offset, uv_scale, color_variance, variance_amount,
             ))
 
         ground = 60
@@ -488,16 +531,34 @@ class HolographicTree:
             size = leaf.size * (0.7 + (branch.z_depth + 1) * 0.15)
             zf = (branch.z_depth + 1) / 2
             color = (0.6 + zf * 0.4, 0.95, 1.0, 0.6 * f)
-            stem_length = 0.5
-            tip_height = 0.7
-            instances.extend([attach_x, attach_y, size, math.radians(angle), stem_length, tip_height, *color])
+            instances.extend([
+                attach_x,
+                attach_y,
+                size,
+                math.radians(angle),
+                *leaf.uv_offset,
+                *leaf.uv_scale,
+                float(leaf.atlas_index),
+                *color,
+                *leaf.color_variance,
+                leaf.variance_amount,
+            ])
 
         for lf in self.falling_leaves:
             size = lf.size * (0.8 + (lf.z + 1) * 0.2)
             color = (0.6, 0.9, 1.0, lf.alpha * f)
-            stem_length = 0.5
-            tip_height = 0.7
-            instances.extend([lf.x, lf.y, size, math.radians(lf.rotation), stem_length, tip_height, *color])
+            instances.extend([
+                lf.x,
+                lf.y,
+                size,
+                math.radians(lf.rotation),
+                *lf.uv_offset,
+                *lf.uv_scale,
+                float(lf.atlas_index),
+                *color,
+                *lf.color_variance,
+                lf.variance_amount,
+            ])
 
         return instances
 
@@ -647,6 +708,9 @@ class OpenGLRenderer:
         self.bark_roughness = self._load_texture("assets/bark_roughness.png", fallback_color=(180, 180, 180, 255))
         self.has_bark_normal = Path("assets/bark_normal.png").exists()
         self.has_bark_roughness = Path("assets/bark_roughness.png").exists()
+        self.leaf_atlas = self._load_texture("assets/leaf_atlas.png", fallback_color=(255, 255, 255, 255))
+        self.leaf_atlas.repeat_x = False
+        self.leaf_atlas.repeat_y = False
 
         self.leaf_program = self.ctx.program(
             vertex_shader="""
@@ -655,14 +719,18 @@ class OpenGLRenderer:
                 in vec2 in_center;
                 in float in_size;
                 in float in_rotation;
-                in vec2 in_shape;
+                in vec2 in_uv_offset;
+                in vec2 in_uv_scale;
+                in float in_atlas_index;
                 in vec4 in_color;
+                in vec4 in_variance;
 
                 uniform vec2 u_resolution;
 
                 out vec2 v_uv;
-                out vec2 v_shape;
+                out float v_atlas_index;
                 out vec4 v_color;
+                out vec4 v_variance;
 
                 void main() {
                     float c = cos(in_rotation);
@@ -673,76 +741,41 @@ class OpenGLRenderer:
                     vec2 ndc = vec2((world.x / u_resolution.x) * 2.0 - 1.0,
                                     (world.y / u_resolution.y) * 2.0 - 1.0);
                     gl_Position = vec4(ndc, 0.0, 1.0);
-                    v_uv = in_pos;
-                    v_shape = in_shape;
+                    vec2 base_uv = in_pos * 0.5 + 0.5;
+                    v_uv = in_uv_offset + base_uv * in_uv_scale;
+                    v_atlas_index = in_atlas_index;
                     v_color = in_color;
+                    v_variance = in_variance;
                 }
             """,
             fragment_shader="""
                 #version 330
                 in vec2 v_uv;
-                in vec2 v_shape;
+                in float v_atlas_index;
                 in vec4 v_color;
+                in vec4 v_variance;
+
+                uniform sampler2D u_leaf_atlas;
+                uniform vec2 u_atlas_grid;
+                uniform float u_alpha_cutoff;
 
                 out vec4 f_color;
 
-                float sdSegment(vec2 p, vec2 a, vec2 b) {
-                    vec2 pa = p - a;
-                    vec2 ba = b - a;
-                    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-                    return length(pa - ba * h);
-                }
-
-                float sdTriangle(vec2 p, vec2 a, vec2 b, vec2 c) {
-                    vec2 e0 = b - a;
-                    vec2 e1 = c - b;
-                    vec2 e2 = a - c;
-                    vec2 v0 = p - a;
-                    vec2 v1 = p - b;
-                    vec2 v2 = p - c;
-                    vec2 pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
-                    vec2 pq1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
-                    vec2 pq2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
-                    float s = sign(e0.x * e2.y - e0.y * e2.x);
-                    float d = min(min(dot(pq0, pq0), dot(pq1, pq1)), dot(pq2, pq2));
-                    float side = min(min(s * (v0.x * e0.y - v0.y * e0.x),
-                                         s * (v1.x * e1.y - v1.y * e1.x)),
-                                     s * (v2.x * e2.y - v2.y * e2.x));
-                    return sqrt(d) * sign(side);
-                }
-
                 void main() {
-                    vec2 p = v_uv * 2.0;
-                    vec2 body_center = vec2(0.0, 0.2);
-                    vec2 body_radius = vec2(0.65, 0.95);
-                    vec2 body_d = (p - body_center) / body_radius;
-                    float body_metric = dot(body_d, body_d) - 1.0;
-                    float body_edge = smoothstep(0.08, -0.03, body_metric);
-                    float body_fill = clamp(1.0 - dot(body_d, body_d), 0.0, 1.0);
-
-                    float tip_height = v_shape.y;
-                    vec2 tip_a = vec2(0.0, -0.75 - tip_height);
-                    vec2 tip_b = vec2(0.455, -0.37);
-                    vec2 tip_c = vec2(-0.455, -0.37);
-                    float tip_dist = sdTriangle(p, tip_a, tip_b, tip_c);
-                    float tip_edge = smoothstep(0.08, -0.03, tip_dist);
-
-                    float stem_length = v_shape.x;
-                    vec2 stem_start = vec2(0.0, 1.15);
-                    vec2 stem_end = vec2(0.0, 1.15 + stem_length);
-                    float stem_width = 0.16;
-                    float stem_dist = sdSegment(p, stem_start, stem_end) - stem_width * 0.5;
-                    float stem_edge = smoothstep(0.06, -0.02, stem_dist);
-
-                    float alpha = max(max(body_edge, tip_edge), stem_edge * 0.85);
-                    float inner_glow = mix(0.65, 1.0, body_fill);
-                    alpha *= inner_glow;
-                    if (alpha < 0.01) {
+                    vec2 grid = max(u_atlas_grid, vec2(1.0));
+                    float index = max(v_atlas_index, 0.0);
+                    vec2 cell = vec2(mod(index, grid.x), floor(index / grid.x));
+                    vec2 atlas_uv = (cell + clamp(v_uv, 0.0, 1.0)) / grid;
+                    vec4 tex = texture(u_leaf_atlas, atlas_uv);
+                    float alpha = v_color.a * tex.a;
+                    if (alpha < u_alpha_cutoff) {
                         discard;
                     }
-
-                    float premult_alpha = v_color.a * alpha;
-                    f_color = vec4(v_color.rgb * premult_alpha, premult_alpha);
+                    vec3 variance = v_variance.xyz * v_variance.w;
+                    vec3 tinted = clamp(v_color.rgb * (1.0 + variance), 0.0, 1.0);
+                    vec3 rgb = tinted * tex.rgb;
+                    rgb *= alpha;
+                    f_color = vec4(rgb, alpha);
                 }
             """,
         )
@@ -889,15 +922,12 @@ class OpenGLRenderer:
                 in vec2 v_local;
                 in vec4 v_color;
 
-                uniform float u_glow;
-
                 out vec4 f_color;
 
                 void main() {
                     float edge = abs(v_local.y);
                     float core = smoothstep(1.0, 0.0, edge);
-                    float glow = exp(-edge * 4.0) * u_glow;
-                    float alpha = (v_color.a * core) + glow;
+                    float alpha = v_color.a * core;
                     f_color = vec4(v_color.rgb, alpha);
                 }
             """,
@@ -914,7 +944,7 @@ class OpenGLRenderer:
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
         self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 48)
-        self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 16)
+        self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 24)
         self.bird_instance_vbo = self.ctx.buffer(reserve=4 * 64)
         self.ui_line_instance_vbo = self.ctx.buffer(reserve=4 * 64)
 
@@ -932,8 +962,9 @@ class OpenGLRenderer:
             self.leaf_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.leaf_instance_vbo, "2f f f 2f 4f /i",
-                 "in_center", "in_size", "in_rotation", "in_shape", "in_color"),
+                (self.leaf_instance_vbo, "2f f f 2f 2f f 4f 4f /i",
+                 "in_center", "in_size", "in_rotation", "in_uv_offset", "in_uv_scale",
+                 "in_atlas_index", "in_color", "in_variance"),
             ],
         )
 
@@ -988,7 +1019,11 @@ class OpenGLRenderer:
             self.leaf_instance_vbo.orphan(len(data) * 4)
             self.leaf_instance_vbo.write(data)
             self.leaf_program["u_resolution"].value = (width, height)
-            self.leaf_vao.render(instances=len(leaf_instances) // 10)
+            self.leaf_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
+            self.leaf_program["u_alpha_cutoff"].value = 0.2
+            self.leaf_atlas.use(location=0)
+            self.leaf_program["u_leaf_atlas"].value = 0
+            self.leaf_vao.render(instances=len(leaf_instances) // 17)
 
         bird_instances = self.tree.build_bird_instances()
         if bird_instances:
@@ -1018,7 +1053,6 @@ class OpenGLRenderer:
         self.ui_line_instance_vbo.orphan(len(data) * 4)
         self.ui_line_instance_vbo.write(data)
         self.ui_line_program["u_resolution"].value = (width, height)
-        self.ui_line_program["u_glow"].value = 0.45
         self.ui_line_vao.render(instances=len(ui_instances) // 9)
 
 
