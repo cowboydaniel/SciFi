@@ -806,20 +806,41 @@ class HolographicTree:
         """
         self.canopy_leaves = []
 
-        # Define trunk height from initial tree generation (depth 0 length = 180)
-        trunk_height = 180.0
+        # Calculate canopy bounds from actual tip branch positions
+        # The canopy should encompass where the branches actually are
+        if self.tip_indices:
+            tip_xs = [self.branches[i].end_x for i in self.tip_indices]
+            tip_ys = [self.branches[i].end_y for i in self.tip_indices]
+            tip_zs = [self.branches[i].end_z for i in self.tip_indices]
 
-        # Define canopy ellipsoid parameters relative to trunk height
-        canopy_center = (
-            self.root_x,
-            self.root_y + trunk_height * 0.78,
-            0.0
-        )
-        canopy_radii = (
-            trunk_height * 0.95,   # rx: wide horizontally
-            trunk_height * 0.42,   # ry: shorter vertically (oak is wide, not tall)
-            trunk_height * 0.85    # rz: wide in depth
-        )
+            # Center the canopy around the average tip position
+            canopy_center = (
+                sum(tip_xs) / len(tip_xs),
+                sum(tip_ys) / len(tip_ys),
+                sum(tip_zs) / len(tip_zs)
+            )
+
+            # Calculate spread of tips to determine radii
+            x_spread = max(tip_xs) - min(tip_xs)
+            y_spread = max(tip_ys) - min(tip_ys)
+            z_spread = max(tip_zs) - min(tip_zs)
+
+            # Oak canopy is wider than tall, with some padding
+            # Use max spread as reference, scale others relative to it
+            max_spread = max(x_spread, y_spread, z_spread)
+            canopy_radii = (
+                max_spread * 0.65,   # rx: horizontal width
+                max_spread * 0.45,   # ry: vertical height (shorter for oak)
+                max_spread * 0.60    # rz: depth
+            )
+
+            print(f"Canopy center: ({canopy_center[0]:.1f}, {canopy_center[1]:.1f}, {canopy_center[2]:.1f})")
+            print(f"Canopy radii: ({canopy_radii[0]:.1f}, {canopy_radii[1]:.1f}, {canopy_radii[2]:.1f})")
+        else:
+            # Fallback if no tips (shouldn't happen)
+            print("WARNING: No tip branches found, using fallback canopy position")
+            canopy_center = (self.root_x, self.h * 0.55, 0.0)
+            canopy_radii = (120.0, 70.0, 100.0)
 
         # Target 18000 leaves (mid-range for good FPS)
         # With ~100 leaves per cluster, we need ~180 clusters
@@ -852,7 +873,7 @@ class HolographicTree:
             dz = cluster_z - canopy_center[2]
             horizontal_dist = math.sqrt((dx / canopy_radii[0])**2 + (dz / canopy_radii[2])**2)
             edge_factor = max(0.0, min(1.0, horizontal_dist))
-            droop_amount = (edge_factor ** 1.8) * trunk_height * 0.12
+            droop_amount = (edge_factor ** 1.8) * canopy_radii[1] * 0.25
             cluster_y -= droop_amount
 
             # Find nearest branch tip for attachment
@@ -880,7 +901,9 @@ class HolographicTree:
             )
 
             # Cluster radius for spreading leaves within cluster
-            cluster_radius = trunk_height * 0.05
+            # Use a fraction of the average canopy radius
+            avg_radius = (canopy_radii[0] + canopy_radii[1] + canopy_radii[2]) / 3.0
+            cluster_radius = avg_radius * 0.08
 
             # Create 60-140 tiny leaf cards per cluster
             leaves_per_cluster = random.randint(60, 140)
@@ -921,8 +944,8 @@ class HolographicTree:
                 normal = self._rotate_around_axis(normal, forward, roll)
 
                 # TINY leaf size (critical for realism)
-                # Each leaf card is 1-3% of trunk height
-                leaf_size = trunk_height * random.uniform(0.01, 0.03)
+                # Each leaf card is 1-3% of average canopy radius
+                leaf_size = avg_radius * random.uniform(0.015, 0.04)
 
                 # Per-leaf color jitter (+-10% hue/value variation)
                 color_jitter_r = random.uniform(-0.10, 0.10)
@@ -954,7 +977,18 @@ class HolographicTree:
                     variance_amount=variance_amount,
                 ))
 
+        # Debug: Check branch assignment distribution
+        branch_counts = {}
+        for leaf in self.canopy_leaves:
+            branch_counts[leaf.branch_index] = branch_counts.get(leaf.branch_index, 0) + 1
+
         print(f"Generated {len(self.canopy_leaves)} canopy leaves in {num_clusters} clusters")
+        print(f"Total branches: {len(self.branches)}, Tip branches (depth>=6): {len(self.tip_indices)}")
+        print(f"Leaves distributed across {len(branch_counts)} branches")
+        if len(branch_counts) <= 10:
+            print(f"Branch assignment: {branch_counts}")
+        else:
+            print(f"Top 5 branches: {sorted(branch_counts.items(), key=lambda x: x[1], reverse=True)[:5]}")
 
     def update(self, dt: float):
         self.time += dt
