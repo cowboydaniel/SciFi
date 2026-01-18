@@ -16,6 +16,327 @@ from typing import List
 
 import moderngl
 import pyglet
+import numpy as np
+
+
+# ============================================================================
+# PROCEDURAL TEXTURE GENERATION MODULE
+# ============================================================================
+
+def _fbm_noise(x, y, octaves=4, persistence=0.5, scale=1.0, seed=0):
+    """Fast multi-octave value noise using numpy."""
+    rng = np.random.RandomState(seed)
+    total = np.zeros_like(x, dtype=np.float32)
+    amplitude = 1.0
+    frequency = scale
+    max_value = 0.0
+
+    for _ in range(octaves):
+        # Simple hash-based value noise
+        xi = (x * frequency).astype(np.int32)
+        yi = (y * frequency).astype(np.int32)
+
+        # Hash function
+        h = (xi * 374761393 + yi * 668265263 + seed * 1274126177) & 0x7FFFFFFF
+        h = ((h ^ (h >> 13)) * 1274126177) & 0x7FFFFFFF
+        noise = (h & 0xFFFFFF) / 0xFFFFFF
+
+        total += noise * amplitude
+        max_value += amplitude
+        amplitude *= persistence
+        frequency *= 2.0
+
+    return total / max_value if max_value > 0 else total
+
+
+def _smoothstep(edge0, edge1, x):
+    """Smooth interpolation between edge0 and edge1."""
+    t = np.clip((x - edge0) / (edge1 - edge0 + 1e-8), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def generate_leaf_rgba(size=128, seed=0, variant=0):
+    """
+    Generate a procedural leaf texture with alpha cutout.
+
+    Returns:
+        numpy array of shape (size, size, 4) with uint8 values
+    """
+    rng = np.random.RandomState(seed + variant * 1000)
+
+    # Create coordinate grids centered at 0.5
+    y, x = np.meshgrid(
+        np.linspace(0, 1, size, dtype=np.float32),
+        np.linspace(0, 1, size, dtype=np.float32),
+        indexing='ij'
+    )
+
+    # Center coordinates
+    cx, cy = x - 0.5, y - 0.5
+
+    # Create elliptical leaf shape (tapered)
+    # Make it slightly elongated vertically
+    aspect = rng.uniform(0.45, 0.55)
+    taper = rng.uniform(0.15, 0.25)
+
+    # Distance from center with tapering at ends
+    dist_y = np.abs(cy) / (0.5 - taper * np.abs(cy))
+    dist_x = np.abs(cx) / (aspect * (0.5 - taper * 0.3 * np.abs(cy)))
+    ellipse_dist = np.sqrt(dist_x**2 + dist_y**2)
+
+    # Base leaf shape
+    base_alpha = 1.0 - _smoothstep(0.7, 1.0, ellipse_dist)
+
+    # Add central vein
+    vein_width = 0.015
+    vein_mask = np.abs(cx) < vein_width
+    vein_alpha = _smoothstep(vein_width, 0, np.abs(cx)) * base_alpha
+
+    # Add jagged edges using noise
+    edge_noise = _fbm_noise(x * size * 0.15, y * size * 0.15, octaves=3, persistence=0.6, seed=seed + variant)
+    edge_noise = (edge_noise - 0.5) * 0.15
+
+    # Apply edge noise to alpha
+    alpha = np.clip(base_alpha + edge_noise, 0, 1)
+
+    # Strengthen vein in alpha
+    alpha = np.maximum(alpha, vein_alpha * 0.6)
+
+    # Create green color with variation
+    base_green = rng.uniform(0.35, 0.45)
+    base_brightness = rng.uniform(0.7, 0.85)
+
+    # Color variation based on position (yellowing at edges)
+    edge_factor = _smoothstep(0.3, 0.9, ellipse_dist)
+    yellow_tint = edge_factor * rng.uniform(0.15, 0.25)
+
+    # Add subtle color noise
+    color_noise = _fbm_noise(x * size * 0.08, y * size * 0.08, octaves=2, persistence=0.5, seed=seed + variant + 100)
+    color_variation = (color_noise - 0.5) * 0.15
+
+    # Build RGB channels
+    r = np.clip(base_green + yellow_tint + color_variation, 0, 1) * base_brightness
+    g = np.clip(base_brightness + color_variation * 0.5, 0, 1)
+    b = np.clip(base_green * 0.6 + color_variation, 0, 1) * base_brightness
+
+    # Brighten vein slightly
+    vein_brighten = vein_alpha * 0.15
+    r = np.minimum(r + vein_brighten, 1.0)
+    g = np.minimum(g + vein_brighten, 1.0)
+
+    # Convert to uint8
+    rgba = np.stack([r, g, b, alpha], axis=-1)
+    rgba = (rgba * 255).astype(np.uint8)
+
+    return rgba
+
+
+def generate_bark_albedo(size=256, seed=0):
+    """
+    Generate procedural bark albedo (color) texture.
+
+    Returns:
+        numpy array of shape (size, size, 3) with uint8 values
+    """
+    rng = np.random.RandomState(seed)
+
+    y, x = np.meshgrid(
+        np.linspace(0, 1, size, dtype=np.float32),
+        np.linspace(0, 1, size, dtype=np.float32),
+        indexing='ij'
+    )
+
+    # Base bark noise (rough texture)
+    bark_noise = _fbm_noise(x * size * 0.05, y * size * 0.05, octaves=5, persistence=0.55, seed=seed)
+
+    # Vertical grain pattern
+    grain = _fbm_noise(x * size * 0.3, y * size * 0.02, octaves=3, persistence=0.4, seed=seed + 50)
+    grain = grain * 0.4 + 0.6
+
+    # Darker crevices (vertical)
+    crevice = _fbm_noise(x * size * 0.15, y * size * 0.04, octaves=4, persistence=0.5, seed=seed + 100)
+    crevice = _smoothstep(0.4, 0.6, crevice)
+    darken = 1.0 - crevice * 0.4
+
+    # Combine noise patterns
+    brightness = bark_noise * grain * darken
+    brightness = brightness * 0.5 + 0.25  # Remap to darker range
+
+    # Warm brown color
+    base_r = rng.uniform(0.45, 0.55)
+    base_g = rng.uniform(0.3, 0.38)
+    base_b = rng.uniform(0.2, 0.28)
+
+    r = np.clip(brightness * base_r * 1.1, 0, 1)
+    g = np.clip(brightness * base_g, 0, 1)
+    b = np.clip(brightness * base_b, 0, 1)
+
+    # Convert to uint8
+    rgb = np.stack([r, g, b], axis=-1)
+    rgb = (rgb * 255).astype(np.uint8)
+
+    return rgb
+
+
+def generate_bark_normal(size=256, seed=0):
+    """
+    Generate procedural bark normal map (tangent space).
+
+    Returns:
+        numpy array of shape (size, size, 3) with uint8 values (0-255 maps to -1 to 1)
+    """
+    rng = np.random.RandomState(seed)
+
+    y, x = np.meshgrid(
+        np.linspace(0, 1, size, dtype=np.float32),
+        np.linspace(0, 1, size, dtype=np.float32),
+        indexing='ij'
+    )
+
+    # Generate height map (same patterns as albedo)
+    height = _fbm_noise(x * size * 0.05, y * size * 0.05, octaves=5, persistence=0.55, seed=seed)
+
+    # Add vertical grain bumps
+    grain = _fbm_noise(x * size * 0.3, y * size * 0.02, octaves=3, persistence=0.4, seed=seed + 50)
+    height = height * 0.7 + grain * 0.3
+
+    # Scale height
+    height = height * 0.3
+
+    # Compute gradients (derivatives)
+    dx = np.zeros_like(height)
+    dy = np.zeros_like(height)
+
+    dx[:, 1:] = height[:, 1:] - height[:, :-1]
+    dy[1:, :] = height[1:, :] - height[:-1, :]
+
+    # Scale gradients
+    strength = 2.0
+    dx *= strength
+    dy *= strength
+
+    # Build normal: N = normalize(-dx, -dy, 1)
+    nx = -dx
+    ny = -dy
+    nz = np.ones_like(height)
+
+    # Normalize
+    length = np.sqrt(nx**2 + ny**2 + nz**2)
+    nx /= length
+    ny /= length
+    nz /= length
+
+    # Map from [-1,1] to [0,255]
+    nx = (nx * 0.5 + 0.5)
+    ny = (ny * 0.5 + 0.5)
+    nz = (nz * 0.5 + 0.5)
+
+    rgb = np.stack([nx, ny, nz], axis=-1)
+    rgb = (rgb * 255).astype(np.uint8)
+
+    return rgb
+
+
+def generate_bark_roughness(size=256, seed=0):
+    """
+    Generate procedural bark roughness texture.
+
+    Returns:
+        numpy array of shape (size, size, 1) with uint8 values
+    """
+    rng = np.random.RandomState(seed)
+
+    y, x = np.meshgrid(
+        np.linspace(0, 1, size, dtype=np.float32),
+        np.linspace(0, 1, size, dtype=np.float32),
+        indexing='ij'
+    )
+
+    # Base roughness variation
+    roughness = _fbm_noise(x * size * 0.05, y * size * 0.05, octaves=4, persistence=0.5, seed=seed)
+
+    # Higher roughness in crevices
+    crevice = _fbm_noise(x * size * 0.15, y * size * 0.04, octaves=4, persistence=0.5, seed=seed + 100)
+    crevice = _smoothstep(0.3, 0.7, crevice)
+
+    # Combine: higher in crevices, lower on ridges
+    roughness = roughness * 0.3 + crevice * 0.5 + 0.3
+    roughness = np.clip(roughness, 0, 1)
+
+    # Convert to uint8 grayscale
+    roughness = (roughness * 255).astype(np.uint8)
+    roughness = roughness[..., np.newaxis]  # Add channel dimension
+
+    return roughness
+
+
+def generate_grass_albedo(size=512, seed=0):
+    """
+    Generate procedural grass albedo texture.
+
+    Returns:
+        numpy array of shape (size, size, 3) with uint8 values
+    """
+    rng = np.random.RandomState(seed)
+
+    y, x = np.meshgrid(
+        np.linspace(0, 1, size, dtype=np.float32),
+        np.linspace(0, 1, size, dtype=np.float32),
+        indexing='ij'
+    )
+
+    # Multi-scale grass noise
+    grass_noise = _fbm_noise(x * size * 0.1, y * size * 0.1, octaves=5, persistence=0.5, seed=seed)
+
+    # Add finer detail
+    detail = _fbm_noise(x * size * 0.4, y * size * 0.4, octaves=3, persistence=0.6, seed=seed + 200)
+    grass_noise = grass_noise * 0.7 + detail * 0.3
+
+    # Color variation (green with some yellowing and dark patches)
+    base_brightness = grass_noise * 0.4 + 0.4
+
+    # Base grass green
+    base_r = rng.uniform(0.25, 0.35)
+    base_g = rng.uniform(0.45, 0.55)
+    base_b = rng.uniform(0.2, 0.3)
+
+    # Add color variation
+    r = np.clip(base_brightness * base_r * 1.1, 0, 1)
+    g = np.clip(base_brightness * base_g, 0, 1)
+    b = np.clip(base_brightness * base_b, 0, 1)
+
+    # Convert to uint8
+    rgb = np.stack([r, g, b], axis=-1)
+    rgb = (rgb * 255).astype(np.uint8)
+
+    return rgb
+
+
+def generate_grass_roughness(size=512, seed=0):
+    """
+    Generate procedural grass roughness texture.
+
+    Returns:
+        numpy array of shape (size, size, 1) with uint8 values
+    """
+    rng = np.random.RandomState(seed)
+
+    y, x = np.meshgrid(
+        np.linspace(0, 1, size, dtype=np.float32),
+        np.linspace(0, 1, size, dtype=np.float32),
+        indexing='ij'
+    )
+
+    # Moderate roughness with variation
+    roughness = _fbm_noise(x * size * 0.1, y * size * 0.1, octaves=3, persistence=0.5, seed=seed)
+    roughness = roughness * 0.3 + 0.5  # Range 0.5-0.8
+    roughness = np.clip(roughness, 0, 1)
+
+    # Convert to uint8 grayscale
+    roughness = (roughness * 255).astype(np.uint8)
+    roughness = roughness[..., np.newaxis]  # Add channel dimension
+
+    return roughness
 
 
 @dataclass
@@ -454,56 +775,108 @@ class HolographicTree:
             b.end_x, b.end_y, b.end_z = points[-1]
 
     def _build_canopy_leaves(self):
+        """
+        Build improved canopy with oak-like distribution:
+        - Ellipsoidal volume above trunk
+        - Clusters biased to outer shell
+        - Negative space (random gaps)
+        - Multiple small cards per cluster
+        """
         self.canopy_leaves = []
-        for idx in self.tip_indices:
-            branch = self.branches[idx]
+
+        # Define canopy ellipsoid volume (centered above trunk, wider than tall)
+        canopy_center_y = self.h * 0.55  # Height of canopy center
+        canopy_radii = (120.0, 70.0, 100.0)  # (rx wide, ry shorter, rz wide)
+
+        # Number of cluster points
+        num_clusters = 80
+
+        for cluster_idx in range(num_clusters):
+            # Skip 20% of clusters for negative space
+            if random.random() < 0.2:
+                continue
+
+            # Generate cluster position biased to outer shell
+            theta = random.uniform(0.0, math.tau)
+            phi = math.acos(random.uniform(-1.0, 1.0))
+
+            # Bias radius to outer shell (lerp from 0.55 to 1.0 with power curve)
+            r = random.random() ** 0.35  # Power curve biases towards 1.0
+            r = 0.55 + r * 0.45  # Map to [0.55, 1.0]
+
+            # Convert to Cartesian in ellipsoid
+            dir_x = math.sin(phi) * math.cos(theta)
+            dir_y = math.sin(phi) * math.sin(theta)
+            dir_z = math.cos(phi)
+
+            cluster_x = self.root_x + dir_x * canopy_radii[0] * r
+            cluster_y = canopy_center_y + dir_y * canopy_radii[1] * r
+            cluster_z = dir_z * canopy_radii[2] * r
+
+            # Find nearest branch tip for attachment
+            if self.tip_indices:
+                nearest_idx = min(
+                    self.tip_indices,
+                    key=lambda idx: (
+                        (self.branches[idx].end_x - cluster_x) ** 2 +
+                        (self.branches[idx].end_y - cluster_y) ** 2 +
+                        (self.branches[idx].end_z - cluster_z) ** 2
+                    )
+                )
+            else:
+                nearest_idx = 0
+
+            branch = self.branches[nearest_idx]
             zf = (branch.z_depth + 1) / 2
-            base_color = (0.6 + zf * 0.4, 0.95, 1.0, 0.55)
-            cluster_radius = (
-                random.uniform(16, 26),
-                random.uniform(12, 22),
-                random.uniform(12, 24),
+
+            # Green color with variation (not cyan)
+            base_color = (
+                0.35 + zf * 0.15,  # R: subtle warmth
+                0.65 + zf * 0.2,   # G: dominant green
+                0.25 + zf * 0.15,  # B: less blue
+                1.0                # A: opaque (alpha cutout handles transparency)
             )
-            count = random.randint(20, 60)
-            for i in range(count):
+
+            # Create 3 small leaf cards per cluster at slightly different offsets
+            for card_idx in range(3):
                 atlas_index, uv_offset, uv_scale, color_variance, variance_amount = (
-                    self._make_leaf_style(branch.variation_seed + i * 0.31)
+                    self._make_leaf_style(branch.variation_seed + cluster_idx * 3.17 + card_idx * 1.23)
                 )
-                theta = random.uniform(0.0, math.tau)
-                phi = math.acos(random.uniform(-1.0, 1.0))
-                radius = random.random() ** (1.0 / 3.0)
-                dir_x = math.sin(phi) * math.cos(theta)
-                dir_y = math.sin(phi) * math.sin(theta)
-                dir_z = math.cos(phi)
-                offset = (
-                    dir_x * cluster_radius[0] * radius,
-                    dir_y * cluster_radius[1] * radius,
-                    dir_z * cluster_radius[2] * radius,
-                )
-                jitter = (
-                    random.uniform(-2.0, 2.0),
-                    random.uniform(-2.0, 2.0),
-                    random.uniform(-1.5, 1.5),
-                )
-                offset = (
-                    offset[0] + jitter[0],
-                    offset[1] + jitter[1],
-                    offset[2] + jitter[2],
-                )
+
+                # Small offset within cluster
+                card_offset_x = cluster_x - branch.end_x + random.uniform(-4.0, 4.0)
+                card_offset_y = cluster_y - branch.end_y + random.uniform(-4.0, 4.0)
+                card_offset_z = cluster_z - branch.end_z + random.uniform(-3.0, 3.0)
+
+                # Random orientation
                 yaw = random.uniform(0.0, math.tau)
+                pitch = random.uniform(-0.3, 0.3)  # Slight tilt
+                roll = random.uniform(-0.2, 0.2)
+
+                # Build rotation axes
                 right = (math.cos(yaw), math.sin(yaw), 0.0)
                 up = (-math.sin(yaw), math.cos(yaw), 0.0)
                 normal = (0.0, 0.0, 1.0)
-                droop = math.radians(random.uniform(8.0, 22.0))
+
+                # Apply droop (leaves point slightly downward)
+                droop = math.radians(random.uniform(12.0, 28.0))
                 up = self._rotate_around_axis(up, right, droop)
                 normal = self._rotate_around_axis(normal, right, droop)
-                size = random.uniform(8, 16) * (0.85 + zf * 0.25)
+
+                # Apply pitch rotation
+                up = self._rotate_around_axis(up, right, pitch)
+                normal = self._rotate_around_axis(normal, right, pitch)
+
+                # Smaller leaf size (reduced by ~50%)
+                size = random.uniform(4.0, 7.0) * (0.9 + zf * 0.2)
+
                 axis_x = (right[0] * size, right[1] * size, right[2] * size)
                 axis_y = (up[0] * size, up[1] * size, up[2] * size)
                 axis_z = self._normalize(normal)
+
                 self.canopy_leaves.append(CanopyLeaf(
-                    branch_index=idx,
-                    offset=offset,
+                    branch_index=nearest_idx,
+                    offset=(card_offset_x, card_offset_y, card_offset_z),
                     axis_x=axis_x,
                     axis_y=axis_y,
                     axis_z=axis_z,
@@ -689,30 +1062,30 @@ class HolographicTree:
 
 
 class OpenGLRenderer:
-    def _load_texture(self, path: str, fallback_color: tuple[int, int, int, int]) -> moderngl.Texture:
-        image = None
-        file_path = Path(path)
-        if file_path.exists():
-            try:
-                image = pyglet.image.load(str(file_path))
-            except pyglet.image.codecs.ImageDecodeException:
-                image = None
-        if image:
-            image_data = image.get_image_data()
-            data = image_data.get_data("RGBA", image_data.width * 4)
-            texture = self.ctx.texture((image_data.width, image_data.height), 4, data)
-            texture.repeat_x = True
-            texture.repeat_y = True
-            if image_data.width > 1 or image_data.height > 1:
-                texture.build_mipmaps()
-                texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
-            else:
-                texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
-            return texture
-        texture = self.ctx.texture((1, 1), 4, bytes(fallback_color))
-        texture.repeat_x = True
-        texture.repeat_y = True
-        texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+    def _create_texture_from_array(self, data: np.ndarray, repeat=True, mipmaps=True) -> moderngl.Texture:
+        """Create a moderngl texture from a numpy array."""
+        if data.ndim == 2:
+            # Grayscale
+            height, width = data.shape
+            components = 1
+        elif data.ndim == 3:
+            height, width, components = data.shape
+        else:
+            raise ValueError(f"Invalid array shape: {data.shape}")
+
+        # Ensure data is contiguous and uint8
+        data = np.ascontiguousarray(data, dtype=np.uint8)
+
+        texture = self.ctx.texture((width, height), components, data.tobytes())
+        texture.repeat_x = repeat
+        texture.repeat_y = repeat
+
+        if mipmaps and (width > 1 or height > 1):
+            texture.build_mipmaps()
+            texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        else:
+            texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+
         return texture
 
     @staticmethod
@@ -825,8 +1198,10 @@ class OpenGLRenderer:
         self.alpha_to_coverage_flag = getattr(moderngl, "SAMPLE_ALPHA_TO_COVERAGE", None)
         self.use_alpha_to_coverage = self.ctx.fbo.samples > 1 and self.alpha_to_coverage_flag is not None
 
-        self.camera_position = (tree.w * 0.5, tree.h * 0.6, 520.0)
-        self.camera_target = (tree.w * 0.5, tree.h * 0.45, 0.0)
+        # Camera positioned for photo-like framing (FOV 40 degrees)
+        # Further back and lower to show full tree and ground
+        self.camera_position = (tree.w * 0.5, tree.h * 0.5, 650.0)
+        self.camera_target = (tree.w * 0.5, tree.h * 0.48, 0.0)
         self.camera_up = (0.0, 1.0, 0.0)
         self.light_direction = (0.4, 0.8, 0.35)
         self.light_color = (1.0, 0.98, 0.92)
@@ -974,7 +1349,8 @@ class OpenGLRenderer:
                     float core = smoothstep(1.0, 0.0, edge);
                     float glow = exp(-edge * 4.0) * u_glow;
                     vec2 bark_uv = vec2(v_uv.x * u_bark_uv_scale.x, v_uv.y * u_bark_uv_scale.y);
-                    vec3 albedo = texture(u_bark_albedo, bark_uv).rgb * v_bark_tint;
+                    // Decode sRGB texture to linear
+                    vec3 albedo = pow(texture(u_bark_albedo, bark_uv).rgb, vec3(2.2)) * v_bark_tint;
                     vec3 normal = normalize(v_normal);
                     if (u_has_normal == 1) {
                         vec3 tangent_normal = texture(u_bark_normal, bark_uv).xyz * 2.0 - 1.0;
@@ -1015,17 +1391,70 @@ class OpenGLRenderer:
             """,
         )
 
-        self.bark_albedo = self._load_texture("assets/bark_albedo.png", fallback_color=(94, 63, 45, 255))
-        self.bark_normal = self._load_texture("assets/bark_normal.png", fallback_color=(128, 128, 255, 255))
-        self.bark_roughness = self._load_texture("assets/bark_roughness.png", fallback_color=(180, 180, 180, 255))
-        self.has_bark_normal = Path("assets/bark_normal.png").exists()
-        self.has_bark_roughness = Path("assets/bark_roughness.png").exists()
-        self.leaf_atlas = self._load_texture("assets/leaf_atlas.png", fallback_color=(255, 255, 255, 255))
-        self.leaf_atlas.repeat_x = False
-        self.leaf_atlas.repeat_y = False
-        self.bird_sprite = self._load_texture("assets/bird_sprite.png", fallback_color=(255, 255, 255, 0))
-        self.bird_sprite.repeat_x = False
-        self.bird_sprite.repeat_y = False
+        # Generate all textures procedurally
+        seed = random.randint(0, 100000)
+
+        # Bark textures
+        print("Generating bark albedo...")
+        bark_albedo_data = generate_bark_albedo(size=256, seed=seed)
+        # Convert RGB to RGBA for moderngl
+        bark_albedo_rgba = np.concatenate([bark_albedo_data, np.full((256, 256, 1), 255, dtype=np.uint8)], axis=2)
+        self.bark_albedo = self._create_texture_from_array(bark_albedo_rgba, repeat=True, mipmaps=True)
+
+        print("Generating bark normal...")
+        bark_normal_data = generate_bark_normal(size=256, seed=seed)
+        # Convert RGB to RGBA for moderngl
+        bark_normal_rgba = np.concatenate([bark_normal_data, np.full((256, 256, 1), 255, dtype=np.uint8)], axis=2)
+        self.bark_normal = self._create_texture_from_array(bark_normal_rgba, repeat=True, mipmaps=True)
+
+        print("Generating bark roughness...")
+        bark_roughness_data = generate_bark_roughness(size=256, seed=seed)
+        # Convert to RGBA (replicate grayscale to RGB, then add alpha)
+        bark_roughness_rgb = np.repeat(bark_roughness_data, 3, axis=2)
+        bark_roughness_rgba = np.concatenate([bark_roughness_rgb, np.full((256, 256, 1), 255, dtype=np.uint8)], axis=2)
+        self.bark_roughness = self._create_texture_from_array(bark_roughness_rgba, repeat=True, mipmaps=True)
+
+        self.has_bark_normal = True
+        self.has_bark_roughness = True
+
+        # Leaf atlas (2x2 grid with 2 variants)
+        print("Generating leaf atlas...")
+        leaf_size = 128
+        atlas_size = 256  # 2x2 grid of 128x128 leaves
+        leaf_atlas_data = np.zeros((atlas_size, atlas_size, 4), dtype=np.uint8)
+
+        # Generate 4 leaf variants (2 primary variants, repeated)
+        leaf1 = generate_leaf_rgba(size=leaf_size, seed=seed, variant=0)
+        leaf2 = generate_leaf_rgba(size=leaf_size, seed=seed, variant=1)
+
+        # Fill 2x2 atlas
+        leaf_atlas_data[0:leaf_size, 0:leaf_size] = leaf1
+        leaf_atlas_data[0:leaf_size, leaf_size:atlas_size] = leaf2
+        leaf_atlas_data[leaf_size:atlas_size, 0:leaf_size] = leaf1  # Repeat variant 1
+        leaf_atlas_data[leaf_size:atlas_size, leaf_size:atlas_size] = leaf2  # Repeat variant 2
+
+        self.leaf_atlas = self._create_texture_from_array(leaf_atlas_data, repeat=False, mipmaps=True)
+        # Update tree's atlas dimensions for shader uniforms
+        tree.leaf_atlas_cols = 2
+        tree.leaf_atlas_rows = 2
+
+        # Grass textures
+        print("Generating grass albedo...")
+        grass_albedo_data = generate_grass_albedo(size=512, seed=seed)
+        grass_albedo_rgba = np.concatenate([grass_albedo_data, np.full((512, 512, 1), 255, dtype=np.uint8)], axis=2)
+        self.grass_albedo = self._create_texture_from_array(grass_albedo_rgba, repeat=True, mipmaps=True)
+
+        print("Generating grass roughness...")
+        grass_roughness_data = generate_grass_roughness(size=512, seed=seed)
+        grass_roughness_rgb = np.repeat(grass_roughness_data, 3, axis=2)
+        grass_roughness_rgba = np.concatenate([grass_roughness_rgb, np.full((512, 512, 1), 255, dtype=np.uint8)], axis=2)
+        self.grass_roughness = self._create_texture_from_array(grass_roughness_rgba, repeat=True, mipmaps=True)
+
+        # Bird sprite (simple fallback - not the focus)
+        bird_fallback = np.full((4, 4, 4), [255, 255, 255, 0], dtype=np.uint8)
+        self.bird_sprite = self._create_texture_from_array(bird_fallback, repeat=False, mipmaps=False)
+
+        print("All textures generated successfully!")
 
         self.leaf_program = self.ctx.program(
             vertex_shader="""
@@ -1091,6 +1520,7 @@ class OpenGLRenderer:
                 out vec4 f_color;
 
                 vec3 tone_map(vec3 color) {
+                    // Reinhard tone mapping
                     return color / (color + vec3(1.0));
                 }
 
@@ -1114,32 +1544,64 @@ class OpenGLRenderer:
                 }
 
                 void main() {
+                    // Sample leaf texture
                     vec2 grid = max(u_atlas_grid, vec2(1.0));
                     float index = max(v_atlas_index, 0.0);
                     vec2 cell = vec2(mod(index, grid.x), floor(index / grid.x));
                     vec2 atlas_uv = (cell + clamp(v_uv, 0.0, 1.0)) / grid;
                     vec4 tex = texture(u_leaf_atlas, atlas_uv);
-                    float alpha = v_color.a * tex.a;
-                    alpha *= clamp(abs(v_normal.z), 0.0, 1.0);
-                    if (alpha < u_alpha_cutoff) {
+
+                    // Alpha cutout (discard if below threshold)
+                    if (tex.a < 0.35) {
                         discard;
                     }
+
+                    // Decode sRGB texture to linear
+                    vec3 tex_linear = pow(tex.rgb, vec3(2.2));
+
+                    // Apply color variance
                     vec3 variance = v_variance.xyz * v_variance.w;
                     vec3 tinted = clamp(v_color.rgb * (1.0 + variance), 0.0, 1.0);
-                    vec3 rgb = tinted * tex.rgb;
+                    vec3 albedo = tinted * tex_linear;
+
+                    // Two-sided lighting: flip normal if facing away from camera
                     vec3 normal = normalize(v_normal);
+                    vec3 view_dir = normalize(u_camera_pos - v_world_pos);
+                    if (dot(normal, view_dir) < 0.0) {
+                        normal = -normal;
+                    }
+
                     vec3 light_dir = normalize(u_light_dir);
                     float shadow = shadow_pcf(v_light_space_pos, normal, light_dir);
-                    float diff = max(dot(normal, light_dir), 0.0);
-                    vec3 lighting = (0.25 + diff * 0.75 * shadow) * u_light_color;
-                    rgb *= lighting;
+
+                    // Diffuse lighting
+                    float ndotl = dot(normal, light_dir);
+                    float diff = max(ndotl, 0.0);
+
+                    // Translucency/backlighting (when light is behind the leaf)
+                    float backlight = clamp(-ndotl, 0.0, 1.0);
+                    vec3 translucent = albedo * backlight * 0.35;
+
+                    // Hemispheric ambient based on normal.y
+                    float sky_factor = normal.y * 0.5 + 0.5;
+                    vec3 ambient = mix(vec3(0.15, 0.12, 0.1), vec3(0.3, 0.35, 0.4), sky_factor);
+
+                    // Combine lighting
+                    vec3 direct = albedo * diff * shadow * u_light_color;
+                    vec3 rgb = ambient * albedo + direct + translucent;
+
+                    // Fog
                     float dist = length(u_camera_pos - v_world_pos);
                     float fog = 1.0 - exp(-u_fog_density * dist);
                     rgb = mix(rgb, u_fog_color, clamp(fog, 0.0, 1.0));
+
+                    // Tone mapping
                     rgb = tone_map(rgb);
+
+                    // Gamma correction (linear to sRGB)
                     rgb = pow(rgb, vec3(1.0 / 2.2));
-                    rgb *= alpha;
-                    f_color = vec4(rgb, alpha);
+
+                    f_color = vec4(rgb, 1.0);
                 }
             """,
         )
@@ -1176,6 +1638,7 @@ class OpenGLRenderer:
                 in vec2 v_uv;
                 in vec4 v_light_space_pos;
 
+                uniform sampler2D u_grass_albedo;
                 uniform sampler2D u_shadow_map;
                 uniform vec2 u_shadow_texel;
                 uniform vec3 u_light_dir;
@@ -1183,6 +1646,7 @@ class OpenGLRenderer:
                 uniform vec3 u_camera_pos;
                 uniform vec3 u_fog_color;
                 uniform float u_fog_density;
+                uniform vec2 u_tree_center;
 
                 out vec4 f_color;
 
@@ -1210,23 +1674,46 @@ class OpenGLRenderer:
                 }
 
                 void main() {
+                    // Sample grass texture
+                    vec2 grass_uv = v_uv * 8.0;
+                    vec4 grass_tex = texture(u_grass_albedo, grass_uv);
+
+                    // Decode sRGB to linear
+                    vec3 albedo = pow(grass_tex.rgb, vec3(2.2));
+
+                    // Contact shadow under tree (soft radial falloff)
+                    vec2 tree_offset = v_world_pos.xy - u_tree_center;
+                    float dist_to_tree = length(tree_offset);
+                    float contact_shadow = smoothstep(80.0, 200.0, dist_to_tree);
+                    contact_shadow = mix(0.4, 1.0, contact_shadow);
+
+                    // Lighting
                     vec3 light_dir = normalize(u_light_dir);
                     vec3 normal = normalize(v_normal);
                     float diff = max(dot(normal, light_dir), 0.0);
                     float shadow = shadow_pcf(v_light_space_pos, normal, light_dir);
-                    vec2 grass_uv = v_uv * 6.0;
-                    float patch = sin(grass_uv.x) * cos(grass_uv.y);
-                    float variation = 0.5 + 0.5 * sin(grass_uv.x * 0.7 + grass_uv.y * 0.9);
-                    vec3 base = mix(vec3(0.12, 0.32, 0.12), vec3(0.18, 0.45, 0.2), variation);
-                    base += patch * 0.03;
-                    vec3 ambient = base * 0.2;
-                    vec3 lighting = ambient + base * diff * shadow * u_light_color;
+
+                    // Ambient
+                    vec3 ambient = albedo * vec3(0.25, 0.28, 0.32);
+
+                    // Direct lighting
+                    vec3 direct = albedo * diff * shadow * u_light_color;
+
+                    // Combine with contact shadow
+                    vec3 rgb = (ambient + direct) * contact_shadow;
+
+                    // Fog
                     float dist = length(u_camera_pos - v_world_pos);
                     float fog = 1.0 - exp(-u_fog_density * dist);
-                    vec3 color = mix(lighting, u_fog_color, clamp(fog, 0.0, 1.0));
-                    color = tone_map(color);
-                    color = pow(color, vec3(1.0 / 2.2));
-                    f_color = vec4(color, 1.0);
+                    rgb = mix(rgb, u_fog_color, clamp(fog, 0.0, 1.0));
+
+                    // Tone mapping
+                    rgb = tone_map(rgb);
+
+                    // Gamma correction
+                    rgb = pow(rgb, vec3(1.0 / 2.2));
+
+                    f_color = vec4(rgb, 1.0);
                 }
             """,
         )
@@ -1587,7 +2074,7 @@ class OpenGLRenderer:
         width, height = self.window.get_framebuffer_size()
         aspect = width / max(height, 1)
         view = array('f', self._look_at(self.camera_position, self.camera_target, self.camera_up))
-        proj = array('f', self._perspective(math.radians(45.0), aspect, 10.0, 2000.0))
+        proj = array('f', self._perspective(math.radians(40.0), aspect, 10.0, 2000.0))
         light_target = (self.tree.w * 0.5, self.tree.h * 0.4, 0.0)
         light_dir = self.light_direction
         light_distance = 1200.0
@@ -1671,6 +2158,10 @@ class OpenGLRenderer:
         self.shadow_map.use(location=3)
         shadow_texel = (1.0 / self.shadow_size, 1.0 / self.shadow_size)
 
+        # Bind grass texture for ground
+        self.grass_albedo.use(location=0)
+
+        self.ground_program["u_grass_albedo"].value = 0
         self.ground_program["u_view"].write(view)
         self.ground_program["u_proj"].write(proj)
         self.ground_program["u_light_space"].write(light_space)
@@ -1681,6 +2172,7 @@ class OpenGLRenderer:
         self.ground_program["u_camera_pos"].value = self.camera_position
         self.ground_program["u_fog_color"].value = self.fog_color
         self.ground_program["u_fog_density"].value = self.fog_density
+        self.ground_program["u_tree_center"].value = (self.tree.root_x, self.tree.root_y)
         self.ground_vao.render()
 
         if branch_instances:
@@ -1708,6 +2200,9 @@ class OpenGLRenderer:
             self.branch_vao.render(instances=len(branch_instances) // 24)
 
         if leaf_data:
+            # Disable blending for alpha cutout rendering (depth write ON, blending OFF)
+            self.ctx.disable(moderngl.BLEND)
+
             self.leaf_program["u_view"].write(view)
             self.leaf_program["u_proj"].write(proj)
             self.leaf_program["u_light_space"].write(light_space)
@@ -1725,6 +2220,9 @@ class OpenGLRenderer:
             self.leaf_vao.render(instances=len(leaf_data) // 25)
             if self.use_alpha_to_coverage:
                 self.ctx.disable(self.alpha_to_coverage_flag)
+
+            # Re-enable blending for subsequent rendering
+            self.ctx.enable(moderngl.BLEND)
 
         self.ctx.disable(moderngl.DEPTH_TEST)
         bird_instances = self.tree.build_bird_instances()
