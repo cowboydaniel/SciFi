@@ -777,18 +777,96 @@ class HolographicWindow(pyglet.window.Window):
 
         self.tree = HolographicTree(self.width, self.height)
         self.renderer = OpenGLRenderer(self, self.tree)
-        self.info_label = pyglet.text.Label(
-            "Holographic Tree  •  Press R/Space to regenerate  •  ESC to quit",
-            font_name="Arial",
-            font_size=16,
-            x=30,
-            y=30,
-            color=(120, 235, 255, 180),
-        )
+        self.info_batch = pyglet.graphics.Batch()
+        self.avg_fps = 0.0
+        self._init_labels()
 
         self.last_time = time.perf_counter()
         self.frame_times: List[float] = []
         pyglet.clock.schedule_interval(self.update, 1 / 120.0)
+
+    def _init_labels(self):
+        margin_x = 30
+        top_start_y = self.height - 40
+        line_gap = 22
+        base_color = (120, 235, 255, 180)
+        self.top_labels = {
+            "status": pyglet.text.Label(
+                "HOLOGRAPHIC PROJECTION ACTIVE",
+                font_name="Arial",
+                font_size=16,
+                x=margin_x,
+                y=top_start_y,
+                color=base_color,
+                batch=self.info_batch,
+            ),
+            "branches": pyglet.text.Label(
+                "BRANCHES: 0",
+                font_name="Arial",
+                font_size=16,
+                x=margin_x,
+                y=top_start_y - line_gap,
+                color=base_color,
+                batch=self.info_batch,
+            ),
+            "wind": pyglet.text.Label(
+                "WIND: 0.0",
+                font_name="Arial",
+                font_size=16,
+                x=margin_x,
+                y=top_start_y - line_gap * 2,
+                color=base_color,
+                batch=self.info_batch,
+            ),
+            "fps": pyglet.text.Label(
+                "FPS: 0.0",
+                font_name="Arial",
+                font_size=16,
+                x=margin_x,
+                y=top_start_y - line_gap * 3,
+                color=base_color,
+                batch=self.info_batch,
+            ),
+        }
+        bottom_start_y = 30
+        self.bottom_labels = [
+            pyglet.text.Label(
+                "Holographic Tree",
+                font_name="Arial",
+                font_size=16,
+                x=margin_x,
+                y=bottom_start_y + line_gap,
+                color=base_color,
+                batch=self.info_batch,
+            ),
+            pyglet.text.Label(
+                "Press R/Space to regenerate  •  ESC to quit",
+                font_name="Arial",
+                font_size=16,
+                x=margin_x,
+                y=bottom_start_y,
+                color=base_color,
+                batch=self.info_batch,
+            ),
+        ]
+
+    def _update_labels(self):
+        flicker = self.tree.flicker
+        glow_color = (
+            max(0, min(255, int(120 * flicker))),
+            max(0, min(255, int(235 * flicker))),
+            max(0, min(255, int(255 * flicker))),
+            180,
+        )
+        for label in self.top_labels.values():
+            label.color = glow_color
+        for label in self.bottom_labels:
+            label.color = glow_color
+
+        self.top_labels["branches"].text = f"BRANCHES: {len(self.tree.branches)}"
+        wind_strength = self.tree.wind.base_strength + self.tree.wind.gust_strength
+        self.top_labels["wind"].text = f"WIND: {wind_strength:4.1f}"
+        self.top_labels["fps"].text = f"FPS: {self.avg_fps:4.1f}"
 
     def on_key_press(self, symbol, modifiers):
         if symbol == pyglet.window.key.ESCAPE:
@@ -803,12 +881,16 @@ class HolographicWindow(pyglet.window.Window):
         self.frame_times.append(dt)
         if len(self.frame_times) > 60:
             self.frame_times.pop(0)
+        if self.frame_times:
+            avg_dt = sum(self.frame_times) / len(self.frame_times)
+            self.avg_fps = 1.0 / avg_dt if avg_dt > 0 else 0.0
         self.tree.update(dt)
+        self._update_labels()
 
     def on_draw(self):
         self.clear()
         self.renderer.render()
-        self.info_label.draw()
+        self.info_batch.draw()
 
 
 def main():
