@@ -110,6 +110,7 @@ class HolographicTree:
         self.h = height
         self.time = 0.0
         self.flicker = 1.0
+        self.flicker_pulse = 0.0
 
         self.wind = WindSystem()
 
@@ -384,9 +385,11 @@ class HolographicTree:
             b.segment_points = points
             b.end_x, b.end_y = points[-1]
 
-        self.flicker = 0.88 + 0.12 * math.sin(self.time * 10)
-        if random.random() > 0.97:
-            self.flicker *= 0.75
+        base_flicker = 0.93 + 0.06 * math.sin(self.time * 1.1) + 0.01 * math.sin(self.time * 0.35)
+        if random.random() > 0.994:
+            self.flicker_pulse = max(self.flicker_pulse, random.uniform(0.08, 0.18))
+        self.flicker_pulse *= math.exp(-dt * 1.6)
+        self.flicker = max(0.78, min(1.06, base_flicker + self.flicker_pulse))
 
         if len(self.falling_leaves) < self.max_leaves and self.tip_branches and random.random() > 0.988:
             tb = random.choice(self.tip_branches)
