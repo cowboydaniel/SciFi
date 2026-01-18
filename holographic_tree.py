@@ -810,7 +810,7 @@ class OpenGLRenderer:
                     v_world_pos = world.xyz;
                     v_tangent = normalize(in_transform_0.xyz);
                     v_bitangent = normalize(in_transform_1.xyz);
-                    v_normal = normalize(cross(v_tangent, v_bitangent));
+                    v_normal = normalize(in_transform_2.xyz);
                 }
             """,
             fragment_shader="""
@@ -944,6 +944,7 @@ class OpenGLRenderer:
                 out float v_atlas_index;
                 out vec4 v_color;
                 out vec4 v_variance;
+                out vec3 v_normal;
 
                 void main() {
                     mat4 transform = mat4(in_transform_0, in_transform_1, in_transform_2, in_transform_3);
@@ -954,6 +955,7 @@ class OpenGLRenderer:
                     v_atlas_index = in_atlas_index;
                     v_color = in_color;
                     v_variance = in_variance;
+                    v_normal = normalize(in_transform_2.xyz);
                 }
             """,
             fragment_shader="""
@@ -962,6 +964,7 @@ class OpenGLRenderer:
                 in float v_atlas_index;
                 in vec4 v_color;
                 in vec4 v_variance;
+                in vec3 v_normal;
 
                 uniform sampler2D u_leaf_atlas;
                 uniform vec2 u_atlas_grid;
@@ -980,6 +983,7 @@ class OpenGLRenderer:
                     vec2 atlas_uv = (cell + clamp(v_uv, 0.0, 1.0)) / grid;
                     vec4 tex = texture(u_leaf_atlas, atlas_uv);
                     float alpha = v_color.a * tex.a;
+                    alpha *= clamp(abs(v_normal.z), 0.0, 1.0);
                     if (alpha < u_alpha_cutoff) {
                         discard;
                     }
