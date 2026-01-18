@@ -63,6 +63,24 @@ class AttachedLeaf:
     angle_offset: float
 
 
+@dataclass
+class Bird:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    state: str
+    timer: float
+    wing_phase: float
+    wing_speed: float
+    facing: int
+    perch_index: int = -1
+    hop_count: int = 0
+    hops_before_depart: int = 2
+    hop_offset: tuple[float, float] = (0.0, 0.0)
+    perch_wait: float = 3.0
+
+
 class WindSystem:
     def __init__(self):
         self.time = 0.0
@@ -108,6 +126,20 @@ class HolographicTree:
         self.root_x = width / 2
         self.root_y = 80
 
+        self.bird = Bird(
+            x=-120,
+            y=height * 0.35,
+            vx=0.0,
+            vy=0.0,
+            state="approach",
+            timer=0.0,
+            wing_phase=0.0,
+            wing_speed=12.0,
+            facing=1,
+            hops_before_depart=random.randint(2, 4),
+            perch_wait=random.uniform(2.5, 4.5),
+        )
+
         self.regenerate_tree()
 
     def regenerate_tree(self):
@@ -127,6 +159,118 @@ class HolographicTree:
                     size=random.uniform(6, 12),
                     angle_offset=random.uniform(-12, 12)
                 ))
+        self._reset_bird()
+
+    def _reset_bird(self):
+        self.bird.state = "approach"
+        self.bird.timer = 0.0
+        self.bird.wing_phase = 0.0
+        self.bird.wing_speed = 12.0
+        self.bird.hop_count = 0
+        self.bird.hops_before_depart = random.randint(2, 4)
+        self.bird.perch_wait = random.uniform(2.5, 4.5)
+        self.bird.hop_offset = (0.0, 0.0)
+        self._assign_perch()
+        target = self._get_perch_point()
+        if target:
+            tx, ty, _ = target
+            self.bird.x = -120 if tx > self.w * 0.5 else self.w + 120
+            self.bird.y = ty - 120
+            self.bird.facing = 1 if tx > self.bird.x else -1
+        else:
+            self.bird.x = -120
+            self.bird.y = self.h * 0.35
+            self.bird.facing = 1
+
+    def _assign_perch(self):
+        if not self.tip_indices:
+            self.bird.perch_index = -1
+            return
+        self.bird.perch_index = random.choice(self.tip_indices)
+
+    def _get_perch_point(self) -> tuple[float, float, float] | None:
+        if self.bird.perch_index < 0 or self.bird.perch_index >= len(self.branches):
+            return None
+        branch = self.branches[self.bird.perch_index]
+        return branch.end_x, branch.end_y, branch.current_angle
+
+    def _update_bird(self, dt: float):
+        target = self._get_perch_point()
+        if not target:
+            return
+        tx, ty, angle = target
+        perch_y = ty - 6
+        self.bird.timer += dt
+
+        if self.bird.state == "approach":
+            self.bird.wing_speed = 12.0
+            dx = tx - self.bird.x
+            dy = perch_y - self.bird.y
+            dist = math.hypot(dx, dy)
+            if dist > 1:
+                step = min(dist, 220 * dt)
+                self.bird.x += dx / dist * step
+                self.bird.y += dy / dist * step
+                self.bird.facing = 1 if dx >= 0 else -1
+            if dist < 12:
+                self.bird.state = "land"
+                self.bird.timer = 0.0
+
+        elif self.bird.state == "land":
+            self.bird.wing_speed = 6.0
+            dx = tx - self.bird.x
+            dy = perch_y - self.bird.y
+            dist = math.hypot(dx, dy)
+            if dist > 0.5:
+                step = min(dist, 140 * dt)
+                self.bird.x += dx / dist * step
+                self.bird.y += dy / dist * step
+            if self.bird.timer > 0.45:
+                self.bird.state = "perched"
+                self.bird.timer = 0.0
+                self.bird.hop_offset = (0.0, 0.0)
+
+        elif self.bird.state == "perched":
+            self.bird.wing_speed = 0.0
+            bob = math.sin(self.time * 4.5) * 1.2
+            self.bird.x = tx
+            self.bird.y = perch_y + bob
+            if self.bird.timer > self.bird.perch_wait:
+                if self.bird.hop_count < self.bird.hops_before_depart:
+                    self.bird.state = "hop"
+                    self.bird.timer = 0.0
+                    self.bird.hop_count += 1
+                    hop_dx = math.cos(math.radians(angle)) * -8
+                    hop_dy = math.sin(math.radians(angle)) * -8
+                    self.bird.hop_offset = (hop_dx, hop_dy)
+                else:
+                    self.bird.state = "depart"
+                    self.bird.timer = 0.0
+                    self.bird.vx = self.bird.facing * 240
+                    self.bird.vy = -120
+
+        elif self.bird.state == "hop":
+            hop_time = 0.45
+            t = min(1.0, self.bird.timer / hop_time)
+            arc = math.sin(math.pi * t) * 6
+            hx, hy = self.bird.hop_offset
+            self.bird.x = tx + hx * t
+            self.bird.y = perch_y + hy * t - arc
+            if self.bird.timer >= hop_time:
+                self.bird.state = "perched"
+                self.bird.timer = 0.0
+                self.bird.perch_wait = random.uniform(1.2, 2.2)
+
+        elif self.bird.state == "depart":
+            self.bird.wing_speed = 13.0
+            self.bird.x += self.bird.vx * dt
+            self.bird.y += self.bird.vy * dt
+            self.bird.vy -= 30 * dt
+            if self.bird.x < -200 or self.bird.x > self.w + 200 or self.bird.y < -200:
+                self._reset_bird()
+
+        if self.bird.wing_speed > 0:
+            self.bird.wing_phase += self.bird.wing_speed * dt * 2 * math.pi
 
     def _gen_branch(self, parent: int, angle: float, length: float, depth: int, max_d: int, z: float):
         if depth >= max_d or length < 10:
@@ -276,6 +420,8 @@ class HolographicTree:
                 new_l.append(lf)
         self.falling_leaves = new_l
 
+        self._update_bird(dt)
+
     def build_branch_instances(self) -> List[float]:
         instances: List[float] = []
         f = self.flicker
@@ -317,6 +463,21 @@ class HolographicTree:
             instances.extend([lf.x, lf.y, size, math.radians(lf.rotation), *color])
 
         return instances
+
+    def build_bird_instances(self) -> List[float]:
+        target = self._get_perch_point()
+        if not target:
+            return []
+        bird = self.bird
+        flap = math.sin(bird.wing_phase) if bird.wing_speed > 0 else 0.2
+        size = 18.0
+        color = (0.43, 0.92, 1.0, 0.95 * self.flicker)
+        wing_color = (0.27, 0.78, 1.0, 0.85 * self.flicker)
+        beak_color = (1.0, 0.82, 0.35, 0.9 * self.flicker)
+        return [
+            bird.x, bird.y, size, float(bird.facing), flap,
+            *color, *wing_color, *beak_color,
+        ]
 
 
 class OpenGLRenderer:
@@ -429,6 +590,97 @@ class OpenGLRenderer:
             """,
         )
 
+        self.bird_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec2 in_pos;
+                in vec2 in_center;
+                in float in_size;
+                in float in_facing;
+                in float in_flap;
+                in vec4 in_body_color;
+                in vec4 in_wing_color;
+                in vec4 in_beak_color;
+
+                uniform vec2 u_resolution;
+
+                out vec2 v_pos;
+                out float v_facing;
+                out float v_flap;
+                out vec4 v_body_color;
+                out vec4 v_wing_color;
+                out vec4 v_beak_color;
+
+                void main() {
+                    vec2 scaled = in_pos * vec2(in_size * 1.6, in_size);
+                    vec2 world = in_center + scaled;
+                    vec2 ndc = vec2((world.x / u_resolution.x) * 2.0 - 1.0,
+                                    (world.y / u_resolution.y) * 2.0 - 1.0);
+                    gl_Position = vec4(ndc, 0.0, 1.0);
+                    v_pos = in_pos;
+                    v_facing = in_facing;
+                    v_flap = in_flap;
+                    v_body_color = in_body_color;
+                    v_wing_color = in_wing_color;
+                    v_beak_color = in_beak_color;
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                in vec2 v_pos;
+                in float v_facing;
+                in float v_flap;
+                in vec4 v_body_color;
+                in vec4 v_wing_color;
+                in vec4 v_beak_color;
+
+                out vec4 f_color;
+
+                float ellipse(vec2 p, vec2 center, vec2 radius) {
+                    vec2 d = (p - center) / radius;
+                    float dist = dot(d, d);
+                    return smoothstep(1.08, 1.0, dist);
+                }
+
+                float triangle(vec2 p, vec2 a, vec2 b, vec2 c) {
+                    vec2 v0 = b - a;
+                    vec2 v1 = c - a;
+                    vec2 v2 = p - a;
+                    float denom = v0.x * v1.y - v1.x * v0.y;
+                    if (abs(denom) < 0.0001) {
+                        return 0.0;
+                    }
+                    float u = (v2.x * v1.y - v1.x * v2.y) / denom;
+                    float v = (v0.x * v2.y - v2.x * v0.y) / denom;
+                    float inside = step(0.0, u) * step(0.0, v) * step(u + v, 1.0);
+                    return inside;
+                }
+
+                void main() {
+                    vec2 p = v_pos;
+                    float facing = v_facing;
+                    float body = ellipse(p, vec2(0.0, 0.0), vec2(0.55, 0.25));
+                    float head = ellipse(p, vec2(0.65 * facing, -0.05), vec2(0.18, 0.18));
+                    float wing = ellipse(p, vec2(-0.2 * facing, 0.08 + v_flap * 0.12), vec2(0.45, 0.2));
+                    vec2 beak_a = vec2(0.82 * facing, -0.02);
+                    vec2 beak_b = vec2(1.02 * facing, -0.08);
+                    vec2 beak_c = vec2(1.02 * facing, 0.04);
+                    float beak = triangle(p, beak_a, beak_b, beak_c);
+
+                    float alpha = max(max(body, head), wing * 0.85);
+                    if (alpha < 0.01 && beak < 0.01) {
+                        discard;
+                    }
+
+                    vec4 color = v_body_color;
+                    color = mix(color, v_wing_color, clamp(wing, 0.0, 1.0) * 0.9);
+                    color = mix(color, v_beak_color, beak);
+                    color.a *= max(alpha, beak);
+                    f_color = color;
+                }
+            """,
+        )
+
         quad = [
             -1.0, -1.0,
             1.0, -1.0,
@@ -441,6 +693,7 @@ class OpenGLRenderer:
 
         self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 32)
         self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 16)
+        self.bird_instance_vbo = self.ctx.buffer(reserve=4 * 64)
 
         self.branch_vao = self.ctx.vertex_array(
             self.branch_program,
@@ -457,6 +710,16 @@ class OpenGLRenderer:
                 (self.quad_vbo, "2f", "in_pos"),
                 (self.leaf_instance_vbo, "2f f f 4f /i",
                  "in_center", "in_size", "in_rotation", "in_color"),
+            ],
+        )
+
+        self.bird_vao = self.ctx.vertex_array(
+            self.bird_program,
+            [
+                (self.quad_vbo, "2f", "in_pos"),
+                (self.bird_instance_vbo, "2f f f f 4f 4f 4f /i",
+                 "in_center", "in_size", "in_facing", "in_flap",
+                 "in_body_color", "in_wing_color", "in_beak_color"),
             ],
         )
 
@@ -488,6 +751,14 @@ class OpenGLRenderer:
             self.leaf_instance_vbo.write(data)
             self.leaf_program["u_resolution"].value = (width, height)
             self.leaf_vao.render(instances=len(leaf_instances) // 8)
+
+        bird_instances = self.tree.build_bird_instances()
+        if bird_instances:
+            data = array('f', bird_instances)
+            self.bird_instance_vbo.orphan(len(data) * 4)
+            self.bird_instance_vbo.write(data)
+            self.bird_program["u_resolution"].value = (width, height)
+            self.bird_vao.render(instances=1)
 
 
 class HolographicWindow(pyglet.window.Window):
