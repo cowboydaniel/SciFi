@@ -712,15 +712,29 @@ class OpenGLRenderer:
                 void main() {
                     vec2 p = v_pos;
                     float facing = v_facing;
-                    float body = ellipse(p, vec2(0.0, 0.0), vec2(0.55, 0.25));
-                    float head = ellipse(p, vec2(0.65 * facing, -0.05), vec2(0.18, 0.18));
-                    float wing = ellipse(p, vec2(-0.2 * facing, 0.08 + v_flap * 0.12), vec2(0.45, 0.2));
+                    float body = ellipse(p, vec2(0.05 * facing, 0.0), vec2(0.6, 0.26));
+                    float head = ellipse(p, vec2(0.72 * facing, -0.07), vec2(0.17, 0.17));
+                    float wing_primary = ellipse(
+                        p,
+                        vec2(-0.12 * facing, 0.1 + v_flap * 0.14),
+                        vec2(0.48, 0.22)
+                    );
+                    float wing_secondary = ellipse(
+                        p,
+                        vec2(-0.38 * facing, 0.02 + v_flap * 0.08),
+                        vec2(0.28, 0.16)
+                    );
+                    vec2 tail_a = vec2(-0.7 * facing, 0.0);
+                    vec2 tail_b = vec2(-0.98 * facing, 0.12);
+                    vec2 tail_c = vec2(-0.98 * facing, -0.12);
+                    float tail = triangle(p, tail_a, tail_b, tail_c);
                     vec2 beak_a = vec2(0.82 * facing, -0.02);
                     vec2 beak_b = vec2(1.02 * facing, -0.08);
                     vec2 beak_c = vec2(1.02 * facing, 0.04);
                     float beak = triangle(p, beak_a, beak_b, beak_c);
 
-                    float alpha = max(max(body, head), wing * 0.85);
+                    float wing = max(wing_primary, wing_secondary);
+                    float alpha = max(max(body, head), max(wing * 0.9, tail));
                     if (alpha < 0.01 && beak < 0.01) {
                         discard;
                     }
