@@ -480,12 +480,18 @@ def main():
 
     # Try to load font, but continue without it if there's a circular import issue (Python 3.14)
     font = None
+    use_freetype = False
     try:
         from pygame import freetype
         font = freetype.SysFont("Courier", 16)
+        use_freetype = True
     except ImportError:
         print("Warning: Could not load pygame.freetype due to circular import (Python 3.14 issue)")
-        print("Running without text overlay...")
+        pygame.font.init()
+        try:
+            font = pygame.font.SysFont("Courier", 16)
+        except Exception:
+            font = pygame.font.Font(None, 16)
 
     # Get primary display
     info = pygame.display.Info()
@@ -542,7 +548,7 @@ def main():
         HolographicTree.draw_thick_aaline(screen, ui_color, width - 100, 20, width - 20, 20, 2)
         HolographicTree.draw_thick_aaline(screen, ui_color, width - 20, 20, width - 20, 100, 2)
 
-        # Text (only if font loaded successfully)
+        # Text
         if font:
             texts = [
                 "HOLOGRAPHIC PROJECTION ACTIVE",
@@ -552,7 +558,12 @@ def main():
                 f"FPS: {fps:.1f}"
             ]
             for i, text in enumerate(texts):
-                font.render_to(screen, (30, 40 + i * 22), text, ui_color)
+                pos = (30, 40 + i * 22)
+                if use_freetype:
+                    font.render_to(screen, pos, text, ui_color)
+                else:
+                    text_surface = font.render(text, True, ui_color)
+                    screen.blit(text_surface, pos)
 
             # Bottom status
             bottom_texts = [
@@ -561,7 +572,12 @@ def main():
                 "PHOTON FIELD: ACTIVE"
             ]
             for i, text in enumerate(bottom_texts):
-                font.render_to(screen, (30, height - 90 + i * 22), text, ui_color)
+                pos = (30, height - 90 + i * 22)
+                if use_freetype:
+                    font.render_to(screen, pos, text, ui_color)
+                else:
+                    text_surface = font.render(text, True, ui_color)
+                    screen.blit(text_surface, pos)
 
         pygame.display.flip()
         clock.tick(165)  # Match your 165Hz monitor
