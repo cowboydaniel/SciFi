@@ -735,8 +735,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Holographic Tree")
         self.tree_widget = HolographicTree()
         self.setCentralWidget(self.tree_widget)
-        self.showFullScreen()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+
+        # Open on primary screen
+        screen = QApplication.primaryScreen()
+        if screen:
+            self.setGeometry(screen.geometry())
+        self.showFullScreen()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
