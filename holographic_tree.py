@@ -123,6 +123,7 @@ class HolographicTree:
 
         # Leaf surface cache
         self.leaf_surfaces = {}
+        self.leaf_rotation_cache = {}
         self.bird = Bird(
             x=-120,
             y=height * 0.35,
@@ -174,6 +175,7 @@ class HolographicTree:
 
     def regenerate_tree(self):
         self.branches.clear()
+        self.leaf_rotation_cache.clear()
         self._gen_branch(-1, -90, 180, 0, 9, 0.0)
         self.sorted_branches = sorted(self.branches, key=lambda b: b.z_depth)
         self.tip_indices = [i for i, branch in enumerate(self.branches) if branch.depth >= 6]
@@ -258,6 +260,19 @@ class HolographicTree:
         cos_a = math.cos(rad)
         sin_a = math.sin(rad)
         return (x * cos_a - y * sin_a, x * sin_a + y * cos_a)
+
+    def _get_rotated_leaf(self, size: int, angle: float) -> tuple[pygame.Surface, tuple[float, float]]:
+        leaf_surf, base_offset = self._get_leaf_surface(size)
+        angle = angle % 360
+        bucket = int(round(angle / 6)) * 6
+        key = (size, bucket)
+        cached = self.leaf_rotation_cache.get(key)
+        if cached:
+            return cached
+        rotated = pygame.transform.rotate(leaf_surf, -bucket)
+        base_rot = self._rotate_point(base_offset[0], base_offset[1], -bucket)
+        self.leaf_rotation_cache[key] = (rotated, base_rot)
+        return rotated, base_rot
 
     @staticmethod
     def _get_branch_point_and_angle(points: List[tuple], t: float) -> tuple[tuple[float, float], float]:
@@ -662,9 +677,8 @@ class HolographicTree:
             zf = (branch.z_depth + 1) / 2
             shadow_offset = 2 + int((1 - zf) * 3)
 
-            leaf_surf, base_offset = self._get_leaf_surface(size)
-            rotated = pygame.transform.rotate(leaf_surf, -angle)
-            base_rot = self._rotate_point(base_offset[0], base_offset[1], -angle)
+            rotated_base, base_rot = self._get_rotated_leaf(size, angle)
+            rotated = rotated_base.copy()
             x = attach_x - base_rot[0]
             y = attach_y - base_rot[1]
             rect = rotated.get_rect(center=(int(x), int(y)))
@@ -690,8 +704,8 @@ class HolographicTree:
             zf = (lf.z + 1) / 2
             shadow_offset = 2 + int((1 - zf) * 4)
 
-            leaf_surf, _ = self._get_leaf_surface(sz)
-            rotated = pygame.transform.rotate(leaf_surf, -lf.rotation)
+            rotated_base, _ = self._get_rotated_leaf(sz, lf.rotation)
+            rotated = rotated_base.copy()
             rect = rotated.get_rect(center=(int(lf.x), int(lf.y)))
 
             shadow = rotated.copy()
