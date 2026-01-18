@@ -1556,7 +1556,7 @@ class OpenGLRenderer:
                     vec4 tex = texture(u_leaf_atlas, atlas_uv);
 
                     // Alpha cutout (discard if below threshold)
-                    if (tex.a < 0.35) {
+                    if (tex.a < u_alpha_cutoff) {
                         discard;
                     }
 
@@ -2143,7 +2143,7 @@ class OpenGLRenderer:
         if leaf_data:
             self.leaf_shadow_program["u_light_space"].write(light_space)
             self.leaf_shadow_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
-            self.leaf_shadow_program["u_alpha_cutoff"].value = 0.2
+            self.leaf_shadow_program["u_alpha_cutoff"].value = 0.35
             self.leaf_atlas.use(location=0)
             self.leaf_shadow_program["u_leaf_atlas"].value = 0
             self.leaf_shadow_vao.render(instances=len(leaf_data) // 25)
@@ -2211,7 +2211,7 @@ class OpenGLRenderer:
             self.leaf_program["u_proj"].write(proj)
             self.leaf_program["u_light_space"].write(light_space)
             self.leaf_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
-            self.leaf_program["u_alpha_cutoff"].value = 0.2
+            self.leaf_program["u_alpha_cutoff"].value = 0.35
             self.leaf_atlas.use(location=0)
             self.leaf_program["u_leaf_atlas"].value = 0
             self.leaf_program["u_shadow_map"].value = 3
