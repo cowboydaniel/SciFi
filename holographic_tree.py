@@ -814,119 +814,114 @@ class HolographicTree:
 
         print(f"Spawning leaf clusters on {len(self.tip_indices)} branch tips")
 
-        # Spawn multiple clusters per branch tip for density
-        # Each tip gets 2-4 clusters with slight offsets
-        clusters_per_tip = 3
-        total_clusters = len(self.tip_indices) * clusters_per_tip
-
+        # ONE cluster per branch tip to stay in 12K-25K leaf range
+        # 826 tips × 1 cluster × ~22 leaves = ~18,000 leaves
         cluster_count = 0
         for tip_idx in self.tip_indices:
             branch = self.branches[tip_idx]
 
-            # Spawn multiple clusters around this branch tip
-            for cluster_offset in range(clusters_per_tip):
-                # Skip some clusters randomly for negative space
-                if random.random() < 0.15:
-                    continue
+            # Skip ~20% of tips randomly for negative space
+            if random.random() < 0.2:
+                continue
 
-                cluster_count += 1
+            cluster_count += 1
 
-                # Base position at branch tip
-                base_x = branch.end_x
-                base_y = branch.end_y
-                base_z = branch.end_z
+            # Base position at branch tip
+            base_x = branch.end_x
+            base_y = branch.end_y
+            base_z = branch.end_z
 
-                # Small random offset from exact tip position
-                # This creates natural clustering around branch ends
-                offset_range = 15.0  # Small offset in pixels
-                cluster_x = base_x + random.uniform(-offset_range, offset_range)
-                cluster_y = base_y + random.uniform(-offset_range, offset_range)
-                cluster_z = base_z + random.uniform(-offset_range * 0.7, offset_range * 0.7)
+            # Small random offset from exact tip position
+            offset_range = 10.0  # Small offset in pixels
+            cluster_x = base_x + random.uniform(-offset_range, offset_range)
+            cluster_y = base_y + random.uniform(-offset_range, offset_range)
+            cluster_z = base_z + random.uniform(-offset_range * 0.7, offset_range * 0.7)
 
-                zf = (branch.z_depth + 1) / 2
+            zf = (branch.z_depth + 1) / 2
 
-                # Green color with subtle variation
-                base_color = (
-                    0.35 + zf * 0.10,  # R: subtle warmth
-                    0.68 + zf * 0.15,  # G: dominant green
-                    0.28 + zf * 0.10,  # B: less blue
-                    1.0                # A: opaque (alpha cutout handles transparency)
+            # Green color with subtle variation
+            base_color = (
+                0.35 + zf * 0.10,  # R: subtle warmth
+                0.68 + zf * 0.15,  # G: dominant green
+                0.28 + zf * 0.10,  # B: less blue
+                1.0                # A: opaque (alpha cutout handles transparency)
+            )
+
+            # Cluster radius for spreading individual leaves
+            cluster_radius = 12.0  # Slightly larger cluster to fill gaps
+
+            # Reduce leaves per cluster for performance (was 70-120)
+            # Target: 15-30 leaves per cluster
+            leaves_per_cluster = random.randint(15, 30)
+            for card_idx in range(leaves_per_cluster):
+                atlas_index, uv_offset, uv_scale, color_variance, variance_amount = (
+                    self._make_leaf_style(branch.variation_seed + cluster_count * 3.17 + card_idx * 1.23)
                 )
 
-                # Cluster radius for spreading individual leaves
-                cluster_radius = 8.0  # Small cluster of leaves
+                # Random offset within cluster sphere
+                leaf_theta = random.uniform(0.0, math.tau)
+                leaf_phi = math.acos(random.uniform(-1.0, 1.0))
+                leaf_r = random.uniform(0.0, cluster_radius)
+                leaf_offset_x = leaf_r * math.sin(leaf_phi) * math.cos(leaf_theta)
+                leaf_offset_y = leaf_r * math.sin(leaf_phi) * math.sin(leaf_theta)
+                leaf_offset_z = leaf_r * math.cos(leaf_phi)
 
-                # Create 70-120 leaf cards per cluster (tightened range for consistency)
-                leaves_per_cluster = random.randint(70, 120)
-                for card_idx in range(leaves_per_cluster):
-                    atlas_index, uv_offset, uv_scale, color_variance, variance_amount = (
-                        self._make_leaf_style(branch.variation_seed + cluster_count * 3.17 + card_idx * 1.23)
-                    )
+                card_offset_x = cluster_x - branch.end_x + leaf_offset_x
+                card_offset_y = cluster_y - branch.end_y + leaf_offset_y
+                card_offset_z = cluster_z - branch.end_z + leaf_offset_z
 
-                    # Random offset within cluster sphere
-                    leaf_theta = random.uniform(0.0, math.tau)
-                    leaf_phi = math.acos(random.uniform(-1.0, 1.0))
-                    leaf_r = random.uniform(0.0, cluster_radius)
-                    leaf_offset_x = leaf_r * math.sin(leaf_phi) * math.cos(leaf_theta)
-                    leaf_offset_y = leaf_r * math.sin(leaf_phi) * math.sin(leaf_theta)
-                    leaf_offset_z = leaf_r * math.cos(leaf_phi)
+                # Random orientation: yaw 0..2pi, pitch/roll +-25 degrees
+                yaw = random.uniform(0.0, math.tau)
+                pitch = random.uniform(-0.436, 0.436)  # +-25 degrees in radians
+                roll = random.uniform(-0.436, 0.436)
 
-                    card_offset_x = cluster_x - branch.end_x + leaf_offset_x
-                    card_offset_y = cluster_y - branch.end_y + leaf_offset_y
-                    card_offset_z = cluster_z - branch.end_z + leaf_offset_z
+                # Build rotation axes
+                right = (math.cos(yaw), math.sin(yaw), 0.0)
+                up = (-math.sin(yaw), math.cos(yaw), 0.0)
+                normal = (0.0, 0.0, 1.0)
 
-                    # Random orientation: yaw 0..2pi, pitch/roll +-25 degrees
-                    yaw = random.uniform(0.0, math.tau)
-                    pitch = random.uniform(-0.436, 0.436)  # +-25 degrees in radians
-                    roll = random.uniform(-0.436, 0.436)
+                # Apply pitch rotation
+                up = self._rotate_around_axis(up, right, pitch)
+                normal = self._rotate_around_axis(normal, right, pitch)
 
-                    # Build rotation axes
-                    right = (math.cos(yaw), math.sin(yaw), 0.0)
-                    up = (-math.sin(yaw), math.cos(yaw), 0.0)
-                    normal = (0.0, 0.0, 1.0)
+                # Apply roll rotation (rotate around forward axis)
+                forward = self._normalize(self._cross(right, up))
+                up = self._rotate_around_axis(up, forward, roll)
+                normal = self._rotate_around_axis(normal, forward, roll)
 
-                    # Apply pitch rotation
-                    up = self._rotate_around_axis(up, right, pitch)
-                    normal = self._rotate_around_axis(normal, right, pitch)
+                # TINY leaf size (critical for realism)
+                # Small leaves: 2-5 pixels each
+                leaf_size = random.uniform(2.0, 5.0)
 
-                    # Apply roll rotation (rotate around forward axis)
-                    forward = self._normalize(self._cross(right, up))
-                    up = self._rotate_around_axis(up, forward, roll)
-                    normal = self._rotate_around_axis(normal, forward, roll)
+                # Per-leaf color jitter (+-10% hue/value variation)
+                color_jitter_r = random.uniform(-0.10, 0.10)
+                color_jitter_g = random.uniform(-0.10, 0.10)
+                color_jitter_b = random.uniform(-0.10, 0.10)
 
-                    # TINY leaf size (critical for realism)
-                    # Small leaves: 2-5 pixels each
-                    leaf_size = random.uniform(2.0, 5.0)
+                jittered_color = (
+                    max(0.0, min(1.0, base_color[0] + color_jitter_r)),
+                    max(0.0, min(1.0, base_color[1] + color_jitter_g)),
+                    max(0.0, min(1.0, base_color[2] + color_jitter_b)),
+                    1.0
+                )
 
-                    # Per-leaf color jitter (+-10% hue/value variation)
-                    color_jitter_r = random.uniform(-0.10, 0.10)
-                    color_jitter_g = random.uniform(-0.10, 0.10)
-                    color_jitter_b = random.uniform(-0.10, 0.10)
+                axis_x = (right[0] * leaf_size, right[1] * leaf_size, right[2] * leaf_size)
+                axis_y = (up[0] * leaf_size, up[1] * leaf_size, up[2] * leaf_size)
+                axis_z = self._normalize(normal)
 
-                    jittered_color = (
-                        max(0.0, min(1.0, base_color[0] + color_jitter_r)),
-                        max(0.0, min(1.0, base_color[1] + color_jitter_g)),
-                        max(0.0, min(1.0, base_color[2] + color_jitter_b)),
-                        1.0
-                    )
-
-                    axis_x = (right[0] * leaf_size, right[1] * leaf_size, right[2] * leaf_size)
-                    axis_y = (up[0] * leaf_size, up[1] * leaf_size, up[2] * leaf_size)
-                    axis_z = self._normalize(normal)
-
-                    self.canopy_leaves.append(CanopyLeaf(
-                        branch_index=tip_idx,
-                        offset=(card_offset_x, card_offset_y, card_offset_z),
-                        axis_x=axis_x,
-                        axis_y=axis_y,
-                        axis_z=axis_z,
-                        base_color=jittered_color,
-                        atlas_index=atlas_index,
-                        uv_offset=uv_offset,
-                        uv_scale=uv_scale,
-                        color_variance=color_variance,
-                        variance_amount=variance_amount,
-                    ))
+                self.canopy_leaves.append(CanopyLeaf(
+                    branch_index=tip_idx,
+                    offset=(card_offset_x, card_offset_y, card_offset_z),
+                    axis_x=axis_x,
+                    axis_y=axis_y,
+                    axis_z=axis_z,
+                    base_color=jittered_color,
+                    atlas_index=atlas_index,
+                    uv_offset=uv_offset,
+                    uv_scale=uv_scale,
+                    color_variance=color_variance,
+                    variance_amount=variance_amount,
+                ))
 
         # Debug output
         print(f"Generated {len(self.canopy_leaves)} canopy leaves")
