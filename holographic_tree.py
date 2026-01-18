@@ -11,6 +11,7 @@ from array import array
 import math
 import random
 import time
+from pathlib import Path
 from typing import List
 
 import moderngl
@@ -52,6 +53,9 @@ class Branch:
     segment_jitter: List[float] = field(default_factory=list)
     segment_sway: List[float] = field(default_factory=list)
     segment_points: List[tuple] = field(default_factory=list)
+    variation_seed: float = 0.0
+    bark_tint: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    bark_roughness: float = 0.6
 
 
 @dataclass
@@ -280,6 +284,14 @@ class HolographicTree:
         nz = max(-1, min(1, z + random.uniform(-0.1, 0.1)))
         b = Branch(parent, angle, length, max(2, (max_d - depth) * 2.5),
                    depth, nz, stiff, depth * 0.3 + random.random() * 0.5)
+        b.variation_seed = random.random() * 1000.0
+        rng = random.Random(b.variation_seed)
+        b.bark_tint = (
+            rng.uniform(0.75, 1.05),
+            rng.uniform(0.7, 1.0),
+            rng.uniform(0.65, 0.95),
+        )
+        b.bark_roughness = rng.uniform(0.35, 0.75)
         point_count = random.randint(3, 6)
         segment_count = max(2, point_count - 1)
         weights = [random.uniform(0.6, 1.4) for _ in range(segment_count)]
@@ -437,10 +449,28 @@ class HolographicTree:
             color = (r, g, blue, 0.7)
             th = max(1, b.thickness * (0.85 + zf * 0.3))
             points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
+            if len(points) < 2:
+                continue
+            segment_lengths = []
+            total_length = 0.0
+            for i in range(len(points) - 1):
+                seg_len = math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+                segment_lengths.append(seg_len)
+                total_length += seg_len
+            if total_length <= 0.0001:
+                total_length = 1.0
+            u_cursor = 0.0
             for i in range(len(points) - 1):
                 x0, y0 = points[i]
                 x1, y1 = points[i + 1]
-                instances.extend([x0, y0, x1, y1, th, *color])
+                seg_len = segment_lengths[i]
+                u_start = u_cursor
+                u_end = u_cursor + seg_len
+                u_cursor += seg_len
+                instances.extend([
+                    x0, y0, x1, y1, th, *color,
+                    u_start, u_end, *b.bark_tint, b.bark_roughness,
+                ])
         return instances
 
     def build_leaf_instances(self) -> List[float]:
@@ -488,6 +518,32 @@ class HolographicTree:
 
 
 class OpenGLRenderer:
+    def _load_texture(self, path: str, fallback_color: tuple[int, int, int, int]) -> moderngl.Texture:
+        image = None
+        file_path = Path(path)
+        if file_path.exists():
+            try:
+                image = pyglet.image.load(str(file_path))
+            except pyglet.image.codecs.ImageDecodeException:
+                image = None
+        if image:
+            image_data = image.get_image_data()
+            data = image_data.get_data("RGBA", image_data.width * 4)
+            texture = self.ctx.texture((image_data.width, image_data.height), 4, data)
+            texture.repeat_x = True
+            texture.repeat_y = True
+            if image_data.width > 1 or image_data.height > 1:
+                texture.build_mipmaps()
+                texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+            else:
+                texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            return texture
+        texture = self.ctx.texture((1, 1), 4, bytes(fallback_color))
+        texture.repeat_x = True
+        texture.repeat_y = True
+        texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        return texture
+
     def __init__(self, window: pyglet.window.Window, tree: HolographicTree):
         self.window = window
         self.tree = tree
@@ -503,12 +559,18 @@ class OpenGLRenderer:
                 in vec2 in_end;
                 in float in_thickness;
                 in vec4 in_color;
+                in vec2 in_uv_range;
+                in vec3 in_bark_tint;
+                in float in_roughness;
 
                 uniform vec2 u_resolution;
                 uniform float u_thickness_scale;
 
                 out vec2 v_local;
                 out vec4 v_color;
+                out vec2 v_uv;
+                out vec3 v_bark_tint;
+                out float v_roughness;
 
                 void main() {
                     vec2 dir = in_end - in_start;
@@ -526,14 +588,27 @@ class OpenGLRenderer:
                     gl_Position = vec4(ndc, 0.0, 1.0);
                     v_local = vec2((in_pos.x + 1.0) * 0.5, in_pos.y);
                     v_color = in_color;
+                    float along_uv = (in_pos.x + 1.0) * 0.5;
+                    v_uv = vec2(mix(in_uv_range.x, in_uv_range.y, along_uv), (in_pos.y * 0.5 + 0.5));
+                    v_bark_tint = in_bark_tint;
+                    v_roughness = in_roughness;
                 }
             """,
             fragment_shader="""
                 #version 330
                 in vec2 v_local;
                 in vec4 v_color;
+                in vec2 v_uv;
+                in vec3 v_bark_tint;
+                in float v_roughness;
 
                 uniform float u_glow;
+                uniform sampler2D u_bark_albedo;
+                uniform sampler2D u_bark_normal;
+                uniform sampler2D u_bark_roughness;
+                uniform vec2 u_bark_uv_scale;
+                uniform int u_has_normal;
+                uniform int u_has_roughness;
 
                 out vec4 f_color;
 
@@ -541,11 +616,37 @@ class OpenGLRenderer:
                     float edge = abs(v_local.y);
                     float core = smoothstep(1.0, 0.0, edge);
                     float glow = exp(-edge * 4.0) * u_glow;
+                    vec2 bark_uv = vec2(v_uv.x * u_bark_uv_scale.x, v_uv.y * u_bark_uv_scale.y);
+                    vec3 albedo = texture(u_bark_albedo, bark_uv).rgb * v_bark_tint;
+                    vec3 normal = vec3(0.0, 0.0, 1.0);
+                    if (u_has_normal == 1) {
+                        normal = texture(u_bark_normal, bark_uv).xyz * 2.0 - 1.0;
+                        normal = normalize(normal);
+                    }
+                    float roughness = v_roughness;
+                    if (u_has_roughness == 1) {
+                        roughness = clamp(v_roughness * (0.6 + 0.8 * texture(u_bark_roughness, bark_uv).r), 0.05, 1.0);
+                    }
+                    vec3 light_dir = normalize(vec3(0.25, 0.4, 0.88));
+                    vec3 view_dir = vec3(0.0, 0.0, 1.0);
+                    vec3 half_dir = normalize(light_dir + view_dir);
+                    float diff = max(dot(normal, light_dir), 0.0);
+                    float spec = pow(max(dot(normal, half_dir), 0.0), mix(6.0, 32.0, 1.0 - roughness));
+                    float occlusion = mix(0.65, 1.0, core);
+                    vec3 lit = albedo * (0.35 + diff * 0.75) * occlusion;
+                    lit += spec * (1.0 - roughness) * 0.25;
+                    lit *= v_color.rgb;
                     float alpha = (v_color.a * core) + glow;
-                    f_color = vec4(v_color.rgb, alpha);
+                    f_color = vec4(lit, alpha);
                 }
             """,
         )
+
+        self.bark_albedo = self._load_texture("assets/bark_albedo.png", fallback_color=(94, 63, 45, 255))
+        self.bark_normal = self._load_texture("assets/bark_normal.png", fallback_color=(128, 128, 255, 255))
+        self.bark_roughness = self._load_texture("assets/bark_roughness.png", fallback_color=(180, 180, 180, 255))
+        self.has_bark_normal = Path("assets/bark_normal.png").exists()
+        self.has_bark_roughness = Path("assets/bark_roughness.png").exists()
 
         self.leaf_program = self.ctx.program(
             vertex_shader="""
@@ -812,7 +913,7 @@ class OpenGLRenderer:
         ]
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
-        self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 32)
+        self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 48)
         self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 16)
         self.bird_instance_vbo = self.ctx.buffer(reserve=4 * 64)
         self.ui_line_instance_vbo = self.ctx.buffer(reserve=4 * 64)
@@ -821,8 +922,9 @@ class OpenGLRenderer:
             self.branch_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.branch_instance_vbo, "2f 2f f 4f /i",
-                 "in_start", "in_end", "in_thickness", "in_color"),
+                (self.branch_instance_vbo, "2f 2f f 4f 2f 3f f /i",
+                 "in_start", "in_end", "in_thickness", "in_color",
+                 "in_uv_range", "in_bark_tint", "in_roughness"),
             ],
         )
 
@@ -866,14 +968,23 @@ class OpenGLRenderer:
             self.branch_instance_vbo.write(data)
 
             self.branch_program["u_resolution"].value = (width, height)
+            self.branch_program["u_bark_uv_scale"].value = (0.05, 1.0)
+            self.branch_program["u_has_normal"].value = 1 if self.has_bark_normal else 0
+            self.branch_program["u_has_roughness"].value = 1 if self.has_bark_roughness else 0
+            self.bark_albedo.use(location=0)
+            self.bark_normal.use(location=1)
+            self.bark_roughness.use(location=2)
+            self.branch_program["u_bark_albedo"].value = 0
+            self.branch_program["u_bark_normal"].value = 1
+            self.branch_program["u_bark_roughness"].value = 2
 
             self.branch_program["u_thickness_scale"].value = 3.0
             self.branch_program["u_glow"].value = 0.6
-            self.branch_vao.render(instances=len(branch_instances) // 9)
+            self.branch_vao.render(instances=len(branch_instances) // 15)
 
             self.branch_program["u_thickness_scale"].value = 1.0
             self.branch_program["u_glow"].value = 0.0
-            self.branch_vao.render(instances=len(branch_instances) // 9)
+            self.branch_vao.render(instances=len(branch_instances) // 15)
 
         leaf_instances = self.tree.build_leaf_instances()
         if leaf_instances:
