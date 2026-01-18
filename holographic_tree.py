@@ -1288,12 +1288,9 @@ class OpenGLRenderer:
                 in vec3 in_center;
                 in vec3 in_axis_x;
                 in vec3 in_axis_y;
-                in vec3 in_axis_z;
                 in vec2 in_uv_offset;
                 in vec2 in_uv_scale;
                 in float in_atlas_index;
-                in vec4 in_color;
-                in vec4 in_variance;
 
                 uniform mat4 u_light_space;
 
@@ -1554,10 +1551,10 @@ class OpenGLRenderer:
             self.leaf_shadow_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.leaf_instance_vbo, "3f 3f 3f 3f 2f 2f f 4f 4f /i",
-                 "in_center", "in_axis_x", "in_axis_y", "in_axis_z",
+                (self.leaf_instance_vbo, "3f 3f 3f 12x 2f 2f f 32x /i",
+                 "in_center", "in_axis_x", "in_axis_y",
                  "in_uv_offset", "in_uv_scale",
-                 "in_atlas_index", "in_color", "in_variance"),
+                 "in_atlas_index"),
             ],
         )
 
