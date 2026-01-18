@@ -947,10 +947,10 @@ class HolographicTree:
         for b in self.sorted_branches:
             zf = (b.z_depth + 1) / 2
             pulse = (0.88 + 0.12 * math.sin(self.time * 3 + b.phase_offset)) * f
-            r = (60 + (1 - zf) * 50) * pulse / 255.0
-            g = (200 + zf * 55) * pulse / 255.0
-            blue = 255 * pulse / 255.0
-            color = (r, g, blue, 0.7)
+            # Use neutral color to let bark texture show through
+            # Slight variation for depth but keep it neutral
+            brightness = 0.95 + zf * 0.05
+            color = (brightness * pulse, brightness * pulse, brightness * pulse, 0.7)
             th = max(1, b.thickness * (0.85 + zf * 0.3))
             points = b.segment_points or [(b.start_x, b.start_y, b.start_z), (b.end_x, b.end_y, b.end_z)]
             if len(points) < 2:
@@ -1202,6 +1202,9 @@ class OpenGLRenderer:
         self.alpha_to_coverage_flag = getattr(moderngl, "SAMPLE_ALPHA_TO_COVERAGE", None)
         self.use_alpha_to_coverage = self.ctx.fbo.samples > 1 and self.alpha_to_coverage_flag is not None
 
+        # Debug view mode: 0=final (default), 1=albedo only, 2=normals only
+        self.debug_view_mode = 0
+
         # Camera positioned for photo-like framing (FOV 40 degrees)
         # Further back and lower to show full tree and ground
         self.camera_position = (tree.w * 0.5, tree.h * 0.5, 650.0)
@@ -1293,6 +1296,7 @@ class OpenGLRenderer:
                 uniform vec3 u_light_color;
                 uniform vec3 u_fog_color;
                 uniform float u_fog_density;
+                uniform int u_debug_view;
 
                 out vec4 f_color;
 
@@ -1361,6 +1365,20 @@ class OpenGLRenderer:
                         mat3 tbn = mat3(normalize(v_tangent), normalize(v_bitangent), normalize(v_normal));
                         normal = normalize(tbn * tangent_normal);
                     }
+
+                    // Debug view modes
+                    if (u_debug_view == 1) {
+                        // Albedo only (gamma corrected for display)
+                        vec3 display = pow(albedo, vec3(1.0 / 2.2));
+                        f_color = vec4(display, 1.0);
+                        return;
+                    } else if (u_debug_view == 2) {
+                        // Normals visualization (map from [-1,1] to [0,1] for display)
+                        vec3 normal_display = normal * 0.5 + 0.5;
+                        f_color = vec4(normal_display, 1.0);
+                        return;
+                    }
+
                     float roughness = v_roughness;
                     if (u_has_roughness == 1) {
                         roughness = clamp(v_roughness * (0.6 + 0.8 * texture(u_bark_roughness, bark_uv).r), 0.05, 1.0);
@@ -1520,6 +1538,7 @@ class OpenGLRenderer:
                 uniform vec3 u_camera_pos;
                 uniform vec3 u_fog_color;
                 uniform float u_fog_density;
+                uniform int u_debug_view;
 
                 out vec4 f_color;
 
@@ -1573,6 +1592,19 @@ class OpenGLRenderer:
                     vec3 view_dir = normalize(u_camera_pos - v_world_pos);
                     if (dot(normal, view_dir) < 0.0) {
                         normal = -normal;
+                    }
+
+                    // Debug view modes
+                    if (u_debug_view == 1) {
+                        // Albedo only (gamma corrected for display)
+                        vec3 display = pow(albedo, vec3(1.0 / 2.2));
+                        f_color = vec4(display, 1.0);
+                        return;
+                    } else if (u_debug_view == 2) {
+                        // Normals visualization (map from [-1,1] to [0,1] for display)
+                        vec3 normal_display = normal * 0.5 + 0.5;
+                        f_color = vec4(normal_display, 1.0);
+                        return;
                     }
 
                     vec3 light_dir = normalize(u_light_dir);
@@ -1651,6 +1683,7 @@ class OpenGLRenderer:
                 uniform vec3 u_fog_color;
                 uniform float u_fog_density;
                 uniform vec2 u_tree_center;
+                uniform int u_debug_view;
 
                 out vec4 f_color;
 
@@ -1685,6 +1718,21 @@ class OpenGLRenderer:
                     // Decode sRGB to linear
                     vec3 albedo = pow(grass_tex.rgb, vec3(2.2));
 
+                    vec3 normal = normalize(v_normal);
+
+                    // Debug view modes
+                    if (u_debug_view == 1) {
+                        // Albedo only (gamma corrected for display)
+                        vec3 display = pow(albedo, vec3(1.0 / 2.2));
+                        f_color = vec4(display, 1.0);
+                        return;
+                    } else if (u_debug_view == 2) {
+                        // Normals visualization (map from [-1,1] to [0,1] for display)
+                        vec3 normal_display = normal * 0.5 + 0.5;
+                        f_color = vec4(normal_display, 1.0);
+                        return;
+                    }
+
                     // Contact shadow under tree (soft radial falloff)
                     vec2 tree_offset = v_world_pos.xy - u_tree_center;
                     float dist_to_tree = length(tree_offset);
@@ -1693,7 +1741,6 @@ class OpenGLRenderer:
 
                     // Lighting
                     vec3 light_dir = normalize(u_light_dir);
-                    vec3 normal = normalize(v_normal);
                     float diff = max(dot(normal, light_dir), 0.0);
                     float shadow = shadow_pcf(v_light_space_pos, normal, light_dir);
 
@@ -2143,7 +2190,7 @@ class OpenGLRenderer:
         if leaf_data:
             self.leaf_shadow_program["u_light_space"].write(light_space)
             self.leaf_shadow_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
-            self.leaf_shadow_program["u_alpha_cutoff"].value = 0.35
+            self.leaf_shadow_program["u_alpha_cutoff"].value = 0.4
             self.leaf_atlas.use(location=0)
             self.leaf_shadow_program["u_leaf_atlas"].value = 0
             self.leaf_shadow_vao.render(instances=len(leaf_data) // 25)
@@ -2177,6 +2224,7 @@ class OpenGLRenderer:
         self.ground_program["u_fog_color"].value = self.fog_color
         self.ground_program["u_fog_density"].value = self.fog_density
         self.ground_program["u_tree_center"].value = (self.tree.root_x, self.tree.root_y)
+        self.ground_program["u_debug_view"].value = self.debug_view_mode
         self.ground_vao.render()
 
         if branch_instances:
@@ -2199,6 +2247,7 @@ class OpenGLRenderer:
             self.branch_program["u_light_color"].value = self.light_color
             self.branch_program["u_fog_color"].value = self.fog_color
             self.branch_program["u_fog_density"].value = self.fog_density
+            self.branch_program["u_debug_view"].value = self.debug_view_mode
 
             self.branch_program["u_glow"].value = 0.0
             self.branch_vao.render(instances=len(branch_instances) // 24)
@@ -2211,7 +2260,7 @@ class OpenGLRenderer:
             self.leaf_program["u_proj"].write(proj)
             self.leaf_program["u_light_space"].write(light_space)
             self.leaf_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
-            self.leaf_program["u_alpha_cutoff"].value = 0.35
+            self.leaf_program["u_alpha_cutoff"].value = 0.4
             self.leaf_atlas.use(location=0)
             self.leaf_program["u_leaf_atlas"].value = 0
             self.leaf_program["u_shadow_map"].value = 3
@@ -2221,6 +2270,7 @@ class OpenGLRenderer:
             self.leaf_program["u_camera_pos"].value = self.camera_position
             self.leaf_program["u_fog_color"].value = self.fog_color
             self.leaf_program["u_fog_density"].value = self.fog_density
+            self.leaf_program["u_debug_view"].value = self.debug_view_mode
             self.leaf_vao.render(instances=len(leaf_data) // 25)
             if self.use_alpha_to_coverage:
                 self.ctx.disable(self.alpha_to_coverage_flag)
@@ -2379,6 +2429,18 @@ class HolographicWindow(pyglet.window.Window):
             self.close()
         elif symbol in (pyglet.window.key.R, pyglet.window.key.SPACE):
             self.tree.regenerate_tree()
+        elif symbol == pyglet.window.key._1:
+            # Debug view: albedo only
+            self.renderer.debug_view_mode = 1
+            print("Debug view: Albedo only")
+        elif symbol == pyglet.window.key._2:
+            # Debug view: normals
+            self.renderer.debug_view_mode = 2
+            print("Debug view: Normals")
+        elif symbol == pyglet.window.key._3:
+            # Debug view: final shaded (default)
+            self.renderer.debug_view_mode = 0
+            print("Debug view: Final shaded")
 
     def update(self, _dt):
         now = time.perf_counter()
