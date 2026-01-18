@@ -435,17 +435,18 @@ class HolographicTree(QOpenGLWidget):
             alpha = int((200 + z_factor * 55) * pulse)
             thickness = branch.thickness * (0.85 + z_factor * 0.3)
 
-            painter.setPen(QPen(QColor(r, g, 255, alpha), thickness,
-                               cap=Qt.PenCapStyle.RoundCap))
+            pen = QPen(QColor(r, g, 255, alpha), thickness)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
             painter.drawLine(QPointF(branch.start_x, branch.start_y),
                            QPointF(branch.end_x, branch.end_y))
 
             # Core - only for thicker branches
             if branch.thickness > 4:
                 core_alpha = int(220 * pulse)
-                painter.setPen(QPen(QColor(200, 255, 255, core_alpha),
-                                   max(1, thickness * 0.3),
-                                   cap=Qt.PenCapStyle.RoundCap))
+                core_pen = QPen(QColor(200, 255, 255, core_alpha), max(1, thickness * 0.3))
+                core_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(core_pen)
                 painter.drawLine(QPointF(branch.start_x, branch.start_y),
                                QPointF(branch.end_x, branch.end_y))
 
