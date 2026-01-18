@@ -1504,7 +1504,8 @@ class OpenGLRenderer:
         leaf_atlas_data[leaf_size:atlas_size, 0:leaf_size] = leaf1  # Repeat variant 1
         leaf_atlas_data[leaf_size:atlas_size, leaf_size:atlas_size] = leaf2  # Repeat variant 2
 
-        self.leaf_atlas = self._create_texture_from_array(leaf_atlas_data, repeat=False, mipmaps=True)
+        # Avoid mipmap alpha bleed that can erase tiny leaf cutouts at distance
+        self.leaf_atlas = self._create_texture_from_array(leaf_atlas_data, repeat=False, mipmaps=False)
         # Update tree's atlas dimensions for shader uniforms
         tree.leaf_atlas_cols = 2
         tree.leaf_atlas_rows = 2
@@ -2288,7 +2289,7 @@ class OpenGLRenderer:
             self.leaf_shadow_program["u_branch_positions"].value = 4
             self.leaf_shadow_program["u_light_space"].write(light_space)
             self.leaf_shadow_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
-            self.leaf_shadow_program["u_alpha_cutoff"].value = 0.4
+            self.leaf_shadow_program["u_alpha_cutoff"].value = 0.2
             self.leaf_atlas.use(location=0)
             self.leaf_shadow_program["u_leaf_atlas"].value = 0
             self.leaf_shadow_vao.render(instances=self.leaf_count)
@@ -2361,7 +2362,7 @@ class OpenGLRenderer:
             self.leaf_program["u_proj"].write(proj)
             self.leaf_program["u_light_space"].write(light_space)
             self.leaf_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
-            self.leaf_program["u_alpha_cutoff"].value = 0.4
+            self.leaf_program["u_alpha_cutoff"].value = 0.2
             self.leaf_atlas.use(location=0)
             self.leaf_program["u_leaf_atlas"].value = 0
             self.leaf_program["u_shadow_map"].value = 3
