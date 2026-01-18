@@ -1531,7 +1531,8 @@ class OpenGLRenderer:
             vertex_shader="""
                 #version 330
                 in vec2 in_pos;
-                in vec3 in_center;
+                in float in_branch_index;
+                in vec3 in_offset;
                 in vec3 in_axis_x;
                 in vec3 in_axis_y;
                 in vec3 in_axis_z;
@@ -1544,6 +1545,7 @@ class OpenGLRenderer:
                 uniform mat4 u_view;
                 uniform mat4 u_proj;
                 uniform mat4 u_light_space;
+                uniform samplerBuffer u_branch_positions;  // GPU texture with branch positions
 
                 out vec2 v_uv;
                 out float v_atlas_index;
@@ -1554,8 +1556,15 @@ class OpenGLRenderer:
                 out vec4 v_light_space_pos;
 
                 void main() {
+                    // Look up branch position from GPU buffer
+                    int branch_idx = int(in_branch_index);
+                    vec3 branch_pos = texelFetch(u_branch_positions, branch_idx).xyz;
+
+                    // Calculate final leaf position
+                    vec3 leaf_center = branch_pos + in_offset;
                     vec3 offset = in_axis_x * in_pos.x + in_axis_y * in_pos.y;
-                    vec4 world = vec4(in_center + offset, 1.0);
+                    vec4 world = vec4(leaf_center + offset, 1.0);
+
                     gl_Position = u_proj * u_view * world;
                     vec2 base_uv = in_pos * 0.5 + 0.5;
                     v_uv = in_uv_offset + base_uv * in_uv_scale;
@@ -1876,7 +1885,8 @@ class OpenGLRenderer:
             vertex_shader="""
                 #version 330
                 in vec2 in_pos;
-                in vec3 in_center;
+                in float in_branch_index;
+                in vec3 in_offset;
                 in vec3 in_axis_x;
                 in vec3 in_axis_y;
                 in vec2 in_uv_offset;
@@ -1884,13 +1894,21 @@ class OpenGLRenderer:
                 in float in_atlas_index;
 
                 uniform mat4 u_light_space;
+                uniform samplerBuffer u_branch_positions;
 
                 out vec2 v_uv;
                 out float v_atlas_index;
 
                 void main() {
+                    // Look up branch position from GPU buffer
+                    int branch_idx = int(in_branch_index);
+                    vec3 branch_pos = texelFetch(u_branch_positions, branch_idx).xyz;
+
+                    // Calculate final leaf position
+                    vec3 leaf_center = branch_pos + in_offset;
                     vec3 offset = in_axis_x * in_pos.x + in_axis_y * in_pos.y;
-                    vec4 world = vec4(in_center + offset, 1.0);
+                    vec4 world = vec4(leaf_center + offset, 1.0);
+
                     gl_Position = u_light_space * world;
                     vec2 base_uv = in_pos * 0.5 + 0.5;
                     v_uv = in_uv_offset + base_uv * in_uv_scale;
@@ -2098,6 +2116,16 @@ class OpenGLRenderer:
         self.bird_instance_vbo = self.ctx.buffer(reserve=4 * 64)
         self.ui_line_instance_vbo = self.ctx.buffer(reserve=4 * 64)
 
+        # GPU-driven: Branch position buffer (TBO) for leaves
+        # Stores vec3 position for each branch
+        max_branches = 2048
+        self.branch_position_buffer = self.ctx.buffer(reserve=max_branches * 3 * 4)  # vec3 per branch (RGB32F)
+        # Create texture buffer object for shader access via texelFetch
+        self.branch_position_tbo = self.ctx.texture(
+            self.branch_position_buffer,
+            components=3,  # RGB for XYZ
+        )
+
         self.branch_vao = self.ctx.vertex_array(
             self.branch_program,
             [
@@ -2112,8 +2140,8 @@ class OpenGLRenderer:
             self.leaf_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.leaf_instance_vbo, "3f 3f 3f 3f 2f 2f f 4f 4f /i",
-                 "in_center", "in_axis_x", "in_axis_y", "in_axis_z",
+                (self.leaf_instance_vbo, "f 3f 3f 3f 3f 2f 2f f 4f 4f /i",
+                 "in_branch_index", "in_offset", "in_axis_x", "in_axis_y", "in_axis_z",
                  "in_uv_offset", "in_uv_scale",
                  "in_atlas_index", "in_color", "in_variance"),
             ],
@@ -2142,8 +2170,8 @@ class OpenGLRenderer:
             self.leaf_shadow_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.leaf_instance_vbo, "3f 3f 3f 12x 2f 2f f 32x /i",
-                 "in_center", "in_axis_x", "in_axis_y",
+                (self.leaf_instance_vbo, "f 3f 3f 3f 12x 2f 2f f 32x /i",
+                 "in_branch_index", "in_offset", "in_axis_x", "in_axis_y",
                  "in_uv_offset", "in_uv_scale",
                  "in_atlas_index"),
             ],
@@ -2174,6 +2202,35 @@ class OpenGLRenderer:
             ],
         )
 
+        # Build static leaf data once (GPU-driven approach)
+        self._upload_static_leaf_data()
+        self.leaf_count = len(self.tree.canopy_leaves)
+        print(f"Uploaded {self.leaf_count} static leaves to GPU")
+
+    def _upload_static_leaf_data(self):
+        """Build and upload static leaf instance data once at initialization."""
+        leaf_data: List[float] = []
+        for leaf in self.tree.canopy_leaves:
+            # Static data: branch_index, offset, axes, UV, color
+            leaf_data.extend([
+                float(leaf.branch_index),      # branch index
+                *leaf.offset,                   # offset from branch (x, y, z)
+                *leaf.axis_x,                   # rotation axis x
+                *leaf.axis_y,                   # rotation axis y
+                *leaf.axis_z,                   # rotation axis z (normal)
+                *leaf.uv_offset,                # UV offset
+                *leaf.uv_scale,                 # UV scale
+                float(leaf.atlas_index),        # atlas index
+                *leaf.base_color,               # color (RGBA)
+                *leaf.color_variance,           # color variance (RGB)
+                leaf.variance_amount,           # variance amount
+            ])
+
+        if leaf_data:
+            data = array('f', leaf_data)
+            self.leaf_instance_vbo.orphan(len(data) * 4)
+            self.leaf_instance_vbo.write(data)
+
     def render(self):
         width, height = self.window.get_framebuffer_size()
         aspect = width / max(height, 1)
@@ -2202,37 +2259,21 @@ class OpenGLRenderer:
             self.branch_instance_vbo.orphan(len(data) * 4)
             self.branch_instance_vbo.write(data)
 
-        leaf_instances = self.tree.build_leaf_instances()
-        leaf_data: List[float] = []
-        if leaf_instances:
-            if self.use_alpha_to_coverage:
-                self.ctx.enable(self.alpha_to_coverage_flag)
-            else:
-                if self.alpha_to_coverage_flag is not None:
-                    self.ctx.disable(self.alpha_to_coverage_flag)
-                cx, cy, cz = self.camera_position
-                leaf_instances.sort(
-                    key=lambda inst: (inst.position[0] - cx) ** 2
-                    + (inst.position[1] - cy) ** 2
-                    + (inst.position[2] - cz) ** 2,
-                    reverse=True,
-                )
-            for leaf in leaf_instances:
-                leaf_data.extend([
-                    *leaf.position,
-                    *leaf.axis_x,
-                    *leaf.axis_y,
-                    *leaf.axis_z,
-                    *leaf.uv_offset,
-                    *leaf.uv_scale,
-                    float(leaf.atlas_index),
-                    *leaf.color,
-                    *leaf.color_variance,
-                    leaf.variance_amount,
-                ])
-            data = array('f', leaf_data)
-            self.leaf_instance_vbo.orphan(len(data) * 4)
-            self.leaf_instance_vbo.write(data)
+        # GPU-driven: Update branch positions only (not all leaf data!)
+        branch_positions: List[float] = []
+        for branch in self.tree.branches:
+            branch_positions.extend([branch.end_x, branch.end_y, branch.end_z])
+
+        if branch_positions:
+            data = array('f', branch_positions)
+            self.branch_position_buffer.write(data)
+
+        # Alpha-to-coverage for leaves (if available)
+        if self.use_alpha_to_coverage:
+            self.ctx.enable(self.alpha_to_coverage_flag)
+        else:
+            if self.alpha_to_coverage_flag is not None:
+                self.ctx.disable(self.alpha_to_coverage_flag)
 
         self.shadow_fbo.use()
         self.ctx.viewport = (0, 0, self.shadow_size, self.shadow_size)
@@ -2240,13 +2281,16 @@ class OpenGLRenderer:
         if branch_instances:
             self.branch_shadow_program["u_light_space"].write(light_space)
             self.branch_shadow_vao.render(instances=len(branch_instances) // 24)
-        if leaf_data:
+        if self.leaf_count > 0:
+            # Bind branch position TBO for GPU lookup
+            self.branch_position_tbo.use(location=4)
+            self.leaf_shadow_program["u_branch_positions"].value = 4
             self.leaf_shadow_program["u_light_space"].write(light_space)
             self.leaf_shadow_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
             self.leaf_shadow_program["u_alpha_cutoff"].value = 0.4
             self.leaf_atlas.use(location=0)
             self.leaf_shadow_program["u_leaf_atlas"].value = 0
-            self.leaf_shadow_vao.render(instances=len(leaf_data) // 25)
+            self.leaf_shadow_vao.render(instances=self.leaf_count)
         self.ground_shadow_program["u_light_space"].write(light_space)
         self.ground_shadow_vao.render()
 
@@ -2305,10 +2349,13 @@ class OpenGLRenderer:
             self.branch_program["u_glow"].value = 0.0
             self.branch_vao.render(instances=len(branch_instances) // 24)
 
-        if leaf_data:
+        if self.leaf_count > 0:
             # Disable blending for alpha cutout rendering (depth write ON, blending OFF)
             self.ctx.disable(moderngl.BLEND)
 
+            # Bind branch position TBO for GPU lookup
+            self.branch_position_tbo.use(location=4)
+            self.leaf_program["u_branch_positions"].value = 4
             self.leaf_program["u_view"].write(view)
             self.leaf_program["u_proj"].write(proj)
             self.leaf_program["u_light_space"].write(light_space)
@@ -2324,7 +2371,7 @@ class OpenGLRenderer:
             self.leaf_program["u_fog_color"].value = self.fog_color
             self.leaf_program["u_fog_density"].value = self.fog_density
             self.leaf_program["u_debug_view"].value = self.debug_view_mode
-            self.leaf_vao.render(instances=len(leaf_data) // 25)
+            self.leaf_vao.render(instances=self.leaf_count)
             if self.use_alpha_to_coverage:
                 self.ctx.disable(self.alpha_to_coverage_flag)
 
