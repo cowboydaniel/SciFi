@@ -631,13 +631,14 @@ class OpenGLRenderer:
                     float stem_edge = smoothstep(0.06, -0.02, stem_dist);
 
                     float alpha = max(max(body_edge, tip_edge), stem_edge * 0.85);
+                    float inner_glow = mix(0.65, 1.0, body_fill);
+                    alpha *= inner_glow;
                     if (alpha < 0.01) {
                         discard;
                     }
 
-                    float inner_glow = mix(0.65, 1.0, body_fill);
-                    alpha *= inner_glow;
-                    f_color = vec4(v_color.rgb, v_color.a * alpha);
+                    float premult_alpha = v_color.a * alpha;
+                    f_color = vec4(v_color.rgb * premult_alpha, premult_alpha);
                 }
             """,
         )
