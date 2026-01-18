@@ -8,6 +8,7 @@ GPU ACCELERATED - Full visual effects
 import sys
 import math
 import random
+import time
 from dataclasses import dataclass
 from typing import List
 
@@ -131,6 +132,11 @@ class HolographicTree(QOpenGLWidget):
         self.time = 0.0
         self.flicker_intensity = 1.0
         self.scanline_offset = 0
+
+        # FPS tracking
+        self.frame_times: List[float] = []
+        self.last_time = 0.0
+        self.fps = 60.0
 
         # Wind system
         self.wind = WindSystem()
@@ -328,6 +334,18 @@ class HolographicTree(QOpenGLWidget):
 
     def update_animation(self):
         """Update animation state"""
+        # Calculate FPS
+        current_time = time.perf_counter()
+        if self.last_time > 0:
+            frame_time = current_time - self.last_time
+            self.frame_times.append(frame_time)
+            if len(self.frame_times) > 30:
+                self.frame_times.pop(0)
+            if self.frame_times:
+                avg_frame_time = sum(self.frame_times) / len(self.frame_times)
+                self.fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 60.0
+        self.last_time = current_time
+
         dt = 0.016
         self.time += dt
 
@@ -703,6 +721,7 @@ class HolographicTree(QOpenGLWidget):
         painter.drawText(30, 65, f"PARTICLES: {len(self.particles)}")
         painter.drawText(30, 85, f"BRANCHES: {len(self.branches)}")
         painter.drawText(30, 105, f"WIND FORCE: {wind_str}")
+        painter.drawText(30, 125, f"FPS: {self.fps:.1f}")
 
         for i, text in enumerate(["QUANTUM COHERENCE: STABLE",
                                    "DIMENSIONAL MATRIX: SYNCHRONIZED",
