@@ -681,6 +681,57 @@ class OpenGLRenderer:
             """,
         )
 
+        self.ui_line_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec2 in_pos;
+                in vec2 in_start;
+                in vec2 in_end;
+                in float in_thickness;
+                in vec4 in_color;
+
+                uniform vec2 u_resolution;
+
+                out vec2 v_local;
+                out vec4 v_color;
+
+                void main() {
+                    vec2 dir = in_end - in_start;
+                    float len = length(dir);
+                    if (len < 0.0001) {
+                        len = 0.0001;
+                    }
+                    vec2 dir_n = dir / len;
+                    vec2 normal = vec2(-dir_n.y, dir_n.x);
+                    float half_thick = in_thickness * 0.5;
+                    float along = (in_pos.x + 1.0) * 0.5 * len;
+                    vec2 world = in_start + dir_n * along + normal * (in_pos.y * half_thick);
+                    vec2 ndc = vec2((world.x / u_resolution.x) * 2.0 - 1.0,
+                                    (world.y / u_resolution.y) * 2.0 - 1.0);
+                    gl_Position = vec4(ndc, 0.0, 1.0);
+                    v_local = vec2((in_pos.x + 1.0) * 0.5, in_pos.y);
+                    v_color = in_color;
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                in vec2 v_local;
+                in vec4 v_color;
+
+                uniform float u_glow;
+
+                out vec4 f_color;
+
+                void main() {
+                    float edge = abs(v_local.y);
+                    float core = smoothstep(1.0, 0.0, edge);
+                    float glow = exp(-edge * 4.0) * u_glow;
+                    float alpha = (v_color.a * core) + glow;
+                    f_color = vec4(v_color.rgb, alpha);
+                }
+            """,
+        )
+
         quad = [
             -1.0, -1.0,
             1.0, -1.0,
@@ -694,6 +745,7 @@ class OpenGLRenderer:
         self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 32)
         self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 16)
         self.bird_instance_vbo = self.ctx.buffer(reserve=4 * 64)
+        self.ui_line_instance_vbo = self.ctx.buffer(reserve=4 * 64)
 
         self.branch_vao = self.ctx.vertex_array(
             self.branch_program,
@@ -720,6 +772,15 @@ class OpenGLRenderer:
                 (self.bird_instance_vbo, "2f f f f 4f 4f 4f /i",
                  "in_center", "in_size", "in_facing", "in_flap",
                  "in_body_color", "in_wing_color", "in_beak_color"),
+            ],
+        )
+
+        self.ui_line_vao = self.ctx.vertex_array(
+            self.ui_line_program,
+            [
+                (self.quad_vbo, "2f", "in_pos"),
+                (self.ui_line_instance_vbo, "2f 2f f 4f /i",
+                 "in_start", "in_end", "in_thickness", "in_color"),
             ],
         )
 
@@ -759,6 +820,29 @@ class OpenGLRenderer:
             self.bird_instance_vbo.write(data)
             self.bird_program["u_resolution"].value = (width, height)
             self.bird_vao.render(instances=1)
+
+        flicker = self.tree.flicker
+        ui_color = (
+            (120 / 255) * flicker,
+            (235 / 255) * flicker,
+            (255 / 255) * flicker,
+            180 / 255,
+        )
+        ui_lines = [
+            (20.0, 20.0, 100.0, 20.0),
+            (20.0, 20.0, 20.0, 100.0),
+            (width - 100.0, 20.0, width - 20.0, 20.0),
+            (width - 20.0, 20.0, width - 20.0, 100.0),
+        ]
+        ui_instances = []
+        for x1, y1, x2, y2 in ui_lines:
+            ui_instances.extend([x1, y1, x2, y2, 2.0, *ui_color])
+        data = array('f', ui_instances)
+        self.ui_line_instance_vbo.orphan(len(data) * 4)
+        self.ui_line_instance_vbo.write(data)
+        self.ui_line_program["u_resolution"].value = (width, height)
+        self.ui_line_program["u_glow"].value = 0.45
+        self.ui_line_vao.render(instances=len(ui_instances) // 9)
 
 
 class HolographicWindow(pyglet.window.Window):
