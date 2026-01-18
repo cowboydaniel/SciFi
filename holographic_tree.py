@@ -2118,12 +2118,12 @@ class OpenGLRenderer:
 
         # GPU-driven: Branch position buffer (TBO) for leaves
         # Stores vec3 position for each branch
-        max_branches = 2048
-        self.branch_position_buffer = self.ctx.buffer(reserve=max_branches * 3 * 4)  # vec3 per branch (RGB32F)
-        # Create texture buffer object for shader access via texelFetch
+        self.max_branches = 2048
+        # Create texture for shader access via texelFetch
         self.branch_position_tbo = self.ctx.texture(
-            self.branch_position_buffer,
+            (self.max_branches, 1),
             components=3,  # RGB for XYZ
+            dtype="f4",
         )
 
         self.branch_vao = self.ctx.vertex_array(
@@ -2265,8 +2265,9 @@ class OpenGLRenderer:
             branch_positions.extend([branch.end_x, branch.end_y, branch.end_z])
 
         if branch_positions:
-            data = array('f', branch_positions)
-            self.branch_position_buffer.write(data)
+            branch_count = min(len(branch_positions) // 3, self.max_branches)
+            data = array('f', branch_positions[:branch_count * 3])
+            self.branch_position_tbo.write(data.tobytes(), viewport=(0, 0, branch_count, 1))
 
         # Alpha-to-coverage for leaves (if available)
         if self.use_alpha_to_coverage:
