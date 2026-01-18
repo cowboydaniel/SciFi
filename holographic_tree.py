@@ -1301,21 +1301,25 @@ class OpenGLRenderer:
         self.camera_position = (tree.w * 0.5, tree.h * 0.5, 650.0)
         self.camera_target = (tree.w * 0.5, tree.h * 0.48, 0.0)
         self.camera_up = (0.0, 1.0, 0.0)
-        # Directional sun: coming from upper-left-front
+        # Directional sun: warm light from upper-left-front
         # Direction vector points FROM surface TO light (negated for shader)
-        # Raw direction: (-0.4, -1.0, -0.2) normalized
-        light_dir_raw = (-0.4, -1.0, -0.2)
+        # Raw direction: (-0.35, -1.0, -0.25) normalized
+        light_dir_raw = (-0.35, -1.0, -0.25)
         length = math.sqrt(light_dir_raw[0]**2 + light_dir_raw[1]**2 + light_dir_raw[2]**2)
         self.light_direction = (light_dir_raw[0]/length, light_dir_raw[1]/length, light_dir_raw[2]/length)
-        # Warm sunlight (slightly yellow)
-        self.light_color = (1.0, 0.96, 0.88)
+        # Warm sunlight (slightly yellow) with stronger intensity
+        self.light_color = (1.0 * 3.0, 0.97 * 3.0, 0.90 * 3.0)
         # Sky blue fog color
         self.fog_color = (0.55, 0.68, 0.82)
         # Mild atmospheric fog for depth (not too heavy)
-        self.fog_density = 0.0008
+        self.fog_density = 0.02
 
         self.shadow_size = 2048
-        self.shadow_map = self.ctx.depth_texture((self.shadow_size, self.shadow_size))
+        try:
+            self.shadow_map = self.ctx.depth_texture((self.shadow_size, self.shadow_size))
+        except Exception:
+            self.shadow_size = 1024
+            self.shadow_map = self.ctx.depth_texture((self.shadow_size, self.shadow_size))
         self.shadow_map.repeat_x = False
         self.shadow_map.repeat_y = False
         self.shadow_map.filter = (moderngl.NEAREST, moderngl.NEAREST)
@@ -1438,7 +1442,8 @@ class OpenGLRenderer:
                     if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) {
                         return 1.0;
                     }
-                    float bias = max(0.0015 * (1.0 - dot(normal, light_dir)), 0.0007);
+                    float slope = max(1.0 - dot(normal, light_dir), 0.0);
+                    float bias = max(0.0025 * slope, 0.0006);
                     float current = proj.z - bias;
                     float shadow = 0.0;
                     for (int x = -1; x <= 1; x++) {
@@ -1498,7 +1503,7 @@ class OpenGLRenderer:
                     float shadow = shadow_pcf(v_light_space_pos, normal, light_dir);
                     vec3 radiance = u_light_color;
                     vec3 lighting = (diffuse + specular) * radiance * n_dot_l * shadow;
-                    vec3 ambient = albedo * 0.18;
+                    vec3 ambient = albedo * 0.08;
                     vec3 lit = (ambient + lighting) * occlusion;
                     lit *= v_color.rgb;
 
@@ -1506,7 +1511,7 @@ class OpenGLRenderer:
                     if (u_debug_view != 3) {
                         float dist = length(u_camera_pos - v_world_pos);
                         float fog = 1.0 - exp(-u_fog_density * dist);
-                        lit = mix(lit, u_fog_color, clamp(fog, 0.0, 1.0));
+                        lit = mix(lit, u_fog_color, clamp(fog * 0.35, 0.0, 1.0));
                     }
 
                     lit = tone_map(lit);
@@ -1678,7 +1683,8 @@ class OpenGLRenderer:
                     if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) {
                         return 1.0;
                     }
-                    float bias = max(0.0015 * (1.0 - dot(normal, light_dir)), 0.0007);
+                    float slope = max(1.0 - dot(normal, light_dir), 0.0);
+                    float bias = max(0.0025 * slope, 0.0006);
                     float current = proj.z - bias;
                     float shadow = 0.0;
                     for (int x = -1; x <= 1; x++) {
@@ -1733,6 +1739,9 @@ class OpenGLRenderer:
                     }
 
                     vec3 light_dir = normalize(u_light_dir);
+                    vec3 half_dir = normalize(view_dir + light_dir);
+                    float sun_facing = max(dot(normal, -light_dir), 0.0);
+                    albedo *= mix(0.8, 1.12, sun_facing);
                     float shadow = shadow_pcf(v_light_space_pos, normal, light_dir);
 
                     // Diffuse lighting
@@ -1745,12 +1754,15 @@ class OpenGLRenderer:
 
                     // Hemispheric ambient based on normal.y
                     float sky_factor = normal.y * 0.5 + 0.5;
-                    vec3 ambient = mix(vec3(0.15, 0.12, 0.1), vec3(0.3, 0.35, 0.4), sky_factor);
-                    float hemi = mix(0.25, 1.0, clamp(sky_factor, 0.0, 1.0));
+                    vec3 ambient = mix(vec3(0.08, 0.07, 0.06), vec3(0.18, 0.2, 0.24), sky_factor);
+                    float hemi = mix(0.2, 0.75, clamp(sky_factor, 0.0, 1.0));
                     ambient *= hemi;
 
+                    // Specular highlight
+                    float spec = pow(max(dot(normal, half_dir), 0.0), 32.0) * 0.08;
+
                     // Combine lighting
-                    vec3 direct = albedo * diff * shadow * u_light_color;
+                    vec3 direct = (albedo * diff + vec3(spec)) * shadow * u_light_color;
                     vec3 rgb = ambient * albedo + direct + translucent;
                     rgb *= mix(0.78, 1.05, v_canopy_factor);
 
@@ -1758,7 +1770,7 @@ class OpenGLRenderer:
                     if (u_debug_view != 3) {
                         float dist = length(u_camera_pos - v_world_pos);
                         float fog = 1.0 - exp(-u_fog_density * dist);
-                        rgb = mix(rgb, u_fog_color, clamp(fog, 0.0, 1.0));
+                        rgb = mix(rgb, u_fog_color, clamp(fog * 0.35, 0.0, 1.0));
                     }
 
                     // Tone mapping
@@ -1827,7 +1839,8 @@ class OpenGLRenderer:
                     if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) {
                         return 1.0;
                     }
-                    float bias = max(0.0015 * (1.0 - dot(normal, light_dir)), 0.0007);
+                    float slope = max(1.0 - dot(normal, light_dir), 0.0);
+                    float bias = max(0.0025 * slope, 0.0006);
                     float current = proj.z - bias;
                     float shadow = 0.0;
                     for (int x = -1; x <= 1; x++) {
@@ -1873,9 +1886,10 @@ class OpenGLRenderer:
                     vec3 light_dir = normalize(u_light_dir);
                     float diff = max(dot(normal, light_dir), 0.0);
                     float shadow = shadow_pcf(v_light_space_pos, normal, light_dir);
+                    shadow = pow(shadow, 1.35);
 
                     // Ambient
-                    vec3 ambient = albedo * vec3(0.25, 0.28, 0.32);
+                    vec3 ambient = albedo * vec3(0.12, 0.14, 0.16);
 
                     // Direct lighting
                     vec3 direct = albedo * diff * shadow * u_light_color;
@@ -1887,7 +1901,7 @@ class OpenGLRenderer:
                     if (u_debug_view != 3) {
                         float dist = length(u_camera_pos - v_world_pos);
                         float fog = 1.0 - exp(-u_fog_density * dist);
-                        rgb = mix(rgb, u_fog_color, clamp(fog, 0.0, 1.0));
+                        rgb = mix(rgb, u_fog_color, clamp(fog * 0.35, 0.0, 1.0));
                     }
 
                     // Tone mapping
