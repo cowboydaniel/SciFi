@@ -2563,7 +2563,13 @@ class HolographicWindow(pyglet.window.Window):
     def on_draw(self):
         self.clear()
         self.renderer.render()
+        self._clear_gl_errors()
         self.info_batch.draw()
+
+    @staticmethod
+    def _clear_gl_errors():
+        while pyglet.gl.glGetError() != pyglet.gl.GL_NO_ERROR:
+            continue
 
 
 def main():
