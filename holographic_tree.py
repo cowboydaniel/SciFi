@@ -1067,7 +1067,8 @@ class OpenGLRenderer:
                     vec3 normal = normalize(vec3((v_uv - 0.5) * vec2(0.6, 0.4), 1.0));
                     vec3 light_dir = normalize(vec3(0.35, 0.4, 0.85));
                     float diff = max(dot(normal, light_dir), 0.0);
-                    vec3 tint = mix(v_body_color.rgb, v_wing_color.rgb, 0.2);
+                    float flap = clamp(abs(v_flap), 0.0, 1.0);
+                    vec3 tint = mix(v_body_color.rgb, v_wing_color.rgb, 0.2 + flap * 0.1);
                     tint = mix(tint, v_beak_color.rgb, 0.08);
                     vec3 lit = tex.rgb * tint * (0.75 + diff * 0.25);
                     lit *= alpha;
