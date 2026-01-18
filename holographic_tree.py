@@ -1261,16 +1261,10 @@ class OpenGLRenderer:
             vertex_shader="""
                 #version 330
                 in vec3 in_pos;
-                in vec3 in_normal;
-                in vec2 in_uv;
-                in vec3 in_tangent;
                 in vec4 in_transform_0;
                 in vec4 in_transform_1;
                 in vec4 in_transform_2;
                 in vec4 in_transform_3;
-                in vec4 in_color;
-                in vec3 in_bark_tint;
-                in float in_roughness;
 
                 uniform mat4 u_light_space;
 
@@ -1550,10 +1544,9 @@ class OpenGLRenderer:
         self.branch_shadow_vao = self.ctx.vertex_array(
             self.branch_shadow_program,
             [
-                (self.cylinder_vbo, "3f 3f 2f 3f", "in_pos", "in_normal", "in_uv", "in_tangent"),
-                (self.branch_instance_vbo, "4f 4f 4f 4f 4f 3f f /i",
-                 "in_transform_0", "in_transform_1", "in_transform_2", "in_transform_3", "in_color",
-                 "in_bark_tint", "in_roughness"),
+                (self.cylinder_vbo, "3f 32x", "in_pos"),
+                (self.branch_instance_vbo, "4f 4f 4f 4f 32x /i",
+                 "in_transform_0", "in_transform_1", "in_transform_2", "in_transform_3"),
             ],
         )
 
