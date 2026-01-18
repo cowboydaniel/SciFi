@@ -63,6 +63,15 @@ class Branch:
     segment_points: List[tuple] = field(default_factory=list)
 
 
+@dataclass
+class AttachedLeaf:
+    branch_index: int
+    t: float
+    side: int
+    size: float
+    angle_offset: float
+
+
 class WindSystem:
     def __init__(self):
         self.time = 0.0
@@ -103,6 +112,7 @@ class HolographicTree:
 
         self.sorted_branches: List[Branch] = []
         self.tip_branches: List[Branch] = []
+        self.attached_leaves: List[AttachedLeaf] = []
 
         self.root_x = width / 2
         self.root_y = height - 50
@@ -158,7 +168,18 @@ class HolographicTree:
         self.branches.clear()
         self._gen_branch(-1, -90, 180, 0, 9, 0.0)
         self.sorted_branches = sorted(self.branches, key=lambda b: b.z_depth)
-        self.tip_branches = [b for b in self.branches if b.depth >= 6]
+        tip_indices = [i for i, branch in enumerate(self.branches) if branch.depth >= 6]
+        self.tip_branches = [self.branches[i] for i in tip_indices]
+        self.attached_leaves = []
+        for idx in tip_indices:
+            for _ in range(random.randint(1, 3)):
+                self.attached_leaves.append(AttachedLeaf(
+                    branch_index=idx,
+                    t=random.uniform(0.6, 1.0),
+                    side=random.choice([-1, 1]),
+                    size=random.uniform(6, 12),
+                    angle_offset=random.uniform(-25, 25)
+                ))
 
     def _gen_branch(self, parent: int, angle: float, length: float, depth: int, max_d: int, z: float):
         if depth >= max_d or length < 10:
@@ -340,6 +361,57 @@ class HolographicTree:
                                           points[i][0], points[i][1], points[i + 1][0], points[i + 1][1],
                                           core_th)
 
+        # Attached leaves
+        for leaf in self.attached_leaves:
+            if leaf.branch_index >= len(self.branches):
+                continue
+            branch = self.branches[leaf.branch_index]
+            points = branch.segment_points or [(branch.start_x, branch.start_y), (branch.end_x, branch.end_y)]
+            if len(points) < 2:
+                continue
+            start_x, start_y = points[-2]
+            end_x, end_y = points[-1]
+            dx = end_x - start_x
+            dy = end_y - start_y
+            length = math.hypot(dx, dy)
+            if length == 0:
+                continue
+            nx, ny = -dy / length, dx / length
+            offset = leaf.side * leaf.size * 0.4
+            x = start_x + dx * leaf.t + nx * offset
+            y = start_y + dy * leaf.t + ny * offset
+            angle = math.degrees(math.atan2(dy, dx)) + leaf.angle_offset
+            a = 0.7 * f
+            size = int(leaf.size * (0.7 + (branch.z_depth + 1) * 0.15))
+            size = max(4, size)
+
+            leaf_surf = pygame.Surface((size * 3, size * 3), pygame.SRCALPHA)
+            cx_l, cy_l = size * 3 // 2, size * 3 // 2
+            body_w = int(size * 1.2)
+            body_h = int(size * 1.8)
+            body_rect = pygame.Rect(0, 0, body_w, body_h)
+            body_rect.center = (cx_l, cy_l + int(size * 0.2))
+            tip_height = int(size * 0.6)
+            tip_top = body_rect.top - tip_height
+            tip_left = body_rect.left + int(body_w * 0.15)
+            tip_right = body_rect.right - int(body_w * 0.15)
+            tip_points = [(cx_l, tip_top), (tip_right, body_rect.top + int(body_h * 0.2)),
+                          (tip_left, body_rect.top + int(body_h * 0.2))]
+            fill_color = (90, 220, 255, int(170 * a))
+            outline_color = (180, 255, 255, int(210 * a))
+            pygame.draw.ellipse(leaf_surf, fill_color, body_rect)
+            pygame.draw.polygon(leaf_surf, fill_color, tip_points)
+            pygame.draw.ellipse(leaf_surf, outline_color, body_rect, 1)
+            pygame.draw.polygon(leaf_surf, outline_color, tip_points, 1)
+            stem_length = max(3, int(size * 0.4))
+            stem_start = (cx_l, body_rect.bottom - 1)
+            stem_end = (cx_l, body_rect.bottom + stem_length)
+            pygame.draw.line(leaf_surf, outline_color, stem_start, stem_end, 1)
+
+            rotated = pygame.transform.rotate(leaf_surf, -angle)
+            rect = rotated.get_rect(center=(int(x), int(y)))
+            screen.blit(rotated, rect, special_flags=pygame.BLEND_ADD)
+
         # Particles with cached glow surfaces
         for p in self.particles:
             fade = 1.0 if p.lifetime < p.max_lifetime * 0.6 else (
@@ -366,20 +438,21 @@ class HolographicTree:
             # Create rotated leaf
             leaf_surf = pygame.Surface((sz * 3, sz * 3), pygame.SRCALPHA)
 
-            # Glow
-            pygame.draw.circle(leaf_surf, (80, 200, 255, int(50 * a)),
-                             (sz * 3 // 2, sz * 3 // 2), sz)
-
-            # Leaf shape
+            # Leaf shape (teardrop/ellipse)
             cx_l, cy_l = sz * 3 // 2, sz * 3 // 2
-            points = [
-                (cx_l, cy_l - sz),
-                (cx_l + sz // 2, cy_l),
-                (cx_l, cy_l + int(sz * 0.8)),
-                (cx_l - sz // 2, cy_l)
-            ]
-            pygame.draw.polygon(leaf_surf, (100, 220, 255, int(200 * a)), points)
-            pygame.draw.polygon(leaf_surf, (180, 255, 255, int(180 * a)), points, 1)
+            body_w = int(sz * 1.2)
+            body_h = int(sz * 1.8)
+            body_rect = pygame.Rect(0, 0, body_w, body_h)
+            body_rect.center = (cx_l, cy_l + int(sz * 0.2))
+            tip_height = int(sz * 0.6)
+            tip_top = body_rect.top - tip_height
+            tip_left = body_rect.left + int(body_w * 0.15)
+            tip_right = body_rect.right - int(body_w * 0.15)
+            tip_points = [(cx_l, tip_top), (tip_right, body_rect.top + int(body_h * 0.2)),
+                          (tip_left, body_rect.top + int(body_h * 0.2))]
+            outline_color = (180, 255, 255, int(200 * a))
+            pygame.draw.ellipse(leaf_surf, outline_color, body_rect, 1)
+            pygame.draw.polygon(leaf_surf, outline_color, tip_points, 1)
 
             # Rotate and blit
             rotated = pygame.transform.rotate(leaf_surf, -lf.rotation)
