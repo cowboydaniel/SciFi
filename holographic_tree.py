@@ -98,6 +98,7 @@ class HolographicTree:
         self.branches: List[Branch] = []
         self.falling_leaves: List[FallingLeaf] = []
         self.max_leaves = 18
+        self.leaf_rotation_cache: dict[tuple[int, int], tuple] = {}
 
         self.sorted_branches: List[Branch] = []
         self.tip_branches: List[Branch] = []
