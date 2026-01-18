@@ -1546,7 +1546,7 @@ class OpenGLRenderer:
                 uniform mat4 u_view;
                 uniform mat4 u_proj;
                 uniform mat4 u_light_space;
-                uniform samplerBuffer u_branch_positions;  // GPU texture with branch positions
+                uniform sampler2D u_branch_positions;  // GPU texture with branch positions
 
                 out vec2 v_uv;
                 out float v_atlas_index;
@@ -1559,7 +1559,10 @@ class OpenGLRenderer:
                 void main() {
                     // Look up branch position from GPU buffer
                     int branch_idx = int(in_branch_index);
-                    vec3 branch_pos = texelFetch(u_branch_positions, branch_idx).xyz;
+                    ivec2 size = textureSize(u_branch_positions, 0);
+                    int max_index = max(size.x - 1, 0);
+                    int safe_idx = clamp(branch_idx, 0, max_index);
+                    vec3 branch_pos = texelFetch(u_branch_positions, ivec2(safe_idx, 0), 0).xyz;
 
                     // Calculate final leaf position
                     vec3 leaf_center = branch_pos + in_offset;
@@ -1895,7 +1898,7 @@ class OpenGLRenderer:
                 in float in_atlas_index;
 
                 uniform mat4 u_light_space;
-                uniform samplerBuffer u_branch_positions;
+                uniform sampler2D u_branch_positions;
 
                 out vec2 v_uv;
                 out float v_atlas_index;
@@ -1903,7 +1906,10 @@ class OpenGLRenderer:
                 void main() {
                     // Look up branch position from GPU buffer
                     int branch_idx = int(in_branch_index);
-                    vec3 branch_pos = texelFetch(u_branch_positions, branch_idx).xyz;
+                    ivec2 size = textureSize(u_branch_positions, 0);
+                    int max_index = max(size.x - 1, 0);
+                    int safe_idx = clamp(branch_idx, 0, max_index);
+                    vec3 branch_pos = texelFetch(u_branch_positions, ivec2(safe_idx, 0), 0).xyz;
 
                     // Calculate final leaf position
                     vec3 leaf_center = branch_pos + in_offset;
