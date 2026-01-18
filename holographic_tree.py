@@ -360,6 +360,42 @@ class HolographicTree:
         return atlas_index, uv_offset, uv_scale, color_variance, variance_amount
 
     @staticmethod
+    def _dot(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    @staticmethod
+    def _cross(a: tuple[float, float, float], b: tuple[float, float, float]) -> tuple[float, float, float]:
+        return (
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        )
+
+    @staticmethod
+    def _normalize(v: tuple[float, float, float]) -> tuple[float, float, float]:
+        mag = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+        if mag <= 0.00001:
+            return (0.0, 0.0, 0.0)
+        return (v[0] / mag, v[1] / mag, v[2] / mag)
+
+    @staticmethod
+    def _build_transform(
+        position: tuple[float, float, float],
+        axis_x: tuple[float, float, float],
+        axis_y: tuple[float, float, float],
+        axis_z: tuple[float, float, float],
+        scale_x: float,
+        scale_y: float,
+        scale_z: float,
+    ) -> List[float]:
+        return [
+            axis_x[0] * scale_x, axis_x[1] * scale_x, axis_x[2] * scale_x, 0.0,
+            axis_y[0] * scale_y, axis_y[1] * scale_y, axis_y[2] * scale_y, 0.0,
+            axis_z[0] * scale_z, axis_z[1] * scale_z, axis_z[2] * scale_z, 0.0,
+            position[0], position[1], position[2], 1.0,
+        ]
+
+    @staticmethod
     def _get_branch_point_and_tangent(
         points: List[tuple], t: float
     ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -524,14 +560,33 @@ class HolographicTree:
                 total_length = 1.0
             u_cursor = 0.0
             for i in range(len(points) - 1):
-                x0, y0, _ = points[i]
-                x1, y1, _ = points[i + 1]
+                x0, y0, z0 = points[i]
+                x1, y1, z1 = points[i + 1]
                 seg_len = segment_lengths[i]
+                if seg_len <= 0.0001:
+                    continue
+                direction = self._normalize((x1 - x0, y1 - y0, z1 - z0))
+                up_ref = (0.0, 0.0, 1.0)
+                if abs(self._dot(direction, up_ref)) > 0.92:
+                    up_ref = (0.0, 1.0, 0.0)
+                right = self._normalize(self._cross(up_ref, direction))
+                normal_axis = self._normalize(self._cross(direction, right))
+                half_thick = th * 0.5
+                transform = self._build_transform(
+                    (x0, y0, z0),
+                    direction,
+                    right,
+                    normal_axis,
+                    seg_len,
+                    half_thick,
+                    half_thick,
+                )
                 u_start = u_cursor
                 u_end = u_cursor + seg_len
                 u_cursor += seg_len
                 instances.extend([
-                    x0, y0, x1, y1, th, *color,
+                    *transform,
+                    *color,
                     u_start, u_end, *b.bark_tint, b.bark_roughness,
                 ])
         return instances
@@ -549,17 +604,27 @@ class HolographicTree:
             ]
             if not points:
                 continue
-            (attach_x, attach_y, _), tangent = self._get_branch_point_and_tangent(points, leaf.t)
+            (attach_x, attach_y, attach_z), tangent = self._get_branch_point_and_tangent(points, leaf.t)
             tangent_angle = math.degrees(math.atan2(tangent[1], tangent[0]))
             angle = tangent_angle + 180 + leaf.angle_offset + leaf.side * 6
             size = leaf.size * (0.7 + (branch.z_depth + 1) * 0.15)
             zf = (branch.z_depth + 1) / 2
             color = (0.6 + zf * 0.4, 0.95, 1.0, 0.6 * f)
-            instances.extend([
-                attach_x,
-                attach_y,
+            rot = math.radians(angle)
+            right = (math.cos(rot), math.sin(rot), 0.0)
+            up = (-math.sin(rot), math.cos(rot), 0.0)
+            normal = (0.0, 0.0, 1.0)
+            transform = self._build_transform(
+                (attach_x, attach_y, attach_z),
+                right,
+                up,
+                normal,
                 size,
-                math.radians(angle),
+                size,
+                size,
+            )
+            instances.extend([
+                *transform,
                 *leaf.uv_offset,
                 *leaf.uv_scale,
                 float(leaf.atlas_index),
@@ -571,11 +636,21 @@ class HolographicTree:
         for lf in self.falling_leaves:
             size = lf.size * (0.8 + (lf.z + 1) * 0.2)
             color = (0.6, 0.9, 1.0, lf.alpha * f)
-            instances.extend([
-                lf.x,
-                lf.y,
+            rot = math.radians(lf.rotation)
+            right = (math.cos(rot), math.sin(rot), 0.0)
+            up = (-math.sin(rot), math.cos(rot), 0.0)
+            normal = (0.0, 0.0, 1.0)
+            transform = self._build_transform(
+                (lf.x, lf.y, lf.z),
+                right,
+                up,
+                normal,
                 size,
-                math.radians(lf.rotation),
+                size,
+                size,
+            )
+            instances.extend([
+                *transform,
                 *lf.uv_offset,
                 *lf.uv_scale,
                 float(lf.atlas_index),
@@ -636,26 +711,78 @@ class OpenGLRenderer:
         texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
         return texture
 
+    @staticmethod
+    def _normalize(v: tuple[float, float, float]) -> tuple[float, float, float]:
+        mag = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+        if mag <= 0.00001:
+            return (0.0, 0.0, 0.0)
+        return (v[0] / mag, v[1] / mag, v[2] / mag)
+
+    @staticmethod
+    def _cross(a: tuple[float, float, float], b: tuple[float, float, float]) -> tuple[float, float, float]:
+        return (
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        )
+
+    @staticmethod
+    def _dot(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    def _look_at(
+        self,
+        eye: tuple[float, float, float],
+        target: tuple[float, float, float],
+        up: tuple[float, float, float],
+    ) -> tuple[float, ...]:
+        forward = self._normalize((target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]))
+        side = self._normalize(self._cross(forward, up))
+        up_dir = self._cross(side, forward)
+        return (
+            side[0], up_dir[0], -forward[0], 0.0,
+            side[1], up_dir[1], -forward[1], 0.0,
+            side[2], up_dir[2], -forward[2], 0.0,
+            -self._dot(side, eye), -self._dot(up_dir, eye), self._dot(forward, eye), 1.0,
+        )
+
+    @staticmethod
+    def _perspective(fov_y: float, aspect: float, near: float, far: float) -> tuple[float, ...]:
+        f = 1.0 / math.tan(fov_y / 2.0)
+        nf = 1.0 / (near - far)
+        return (
+            f / aspect, 0.0, 0.0, 0.0,
+            0.0, f, 0.0, 0.0,
+            0.0, 0.0, (far + near) * nf, -1.0,
+            0.0, 0.0, (2.0 * far * near) * nf, 0.0,
+        )
+
     def __init__(self, window: pyglet.window.Window, tree: HolographicTree):
         self.window = window
         self.tree = tree
         self.ctx = moderngl.create_context()
         self.ctx.enable(moderngl.BLEND)
-        self.ctx.blend_func = moderngl.ONE, moderngl.ONE
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+
+        self.camera_position = (tree.w * 0.5, tree.h * 0.6, 520.0)
+        self.camera_target = (tree.w * 0.5, tree.h * 0.45, 0.0)
+        self.camera_up = (0.0, 1.0, 0.0)
 
         self.branch_program = self.ctx.program(
             vertex_shader="""
                 #version 330
                 in vec2 in_pos;
-                in vec2 in_start;
-                in vec2 in_end;
-                in float in_thickness;
+                in vec4 in_transform_0;
+                in vec4 in_transform_1;
+                in vec4 in_transform_2;
+                in vec4 in_transform_3;
                 in vec4 in_color;
                 in vec2 in_uv_range;
                 in vec3 in_bark_tint;
                 in float in_roughness;
 
-                uniform vec2 u_resolution;
+                uniform mat4 u_view;
+                uniform mat4 u_proj;
                 uniform float u_thickness_scale;
 
                 out vec2 v_local;
@@ -663,27 +790,27 @@ class OpenGLRenderer:
                 out vec2 v_uv;
                 out vec3 v_bark_tint;
                 out float v_roughness;
+                out vec3 v_world_pos;
+                out vec3 v_tangent;
+                out vec3 v_bitangent;
+                out vec3 v_normal;
 
                 void main() {
-                    vec2 dir = in_end - in_start;
-                    float len = length(dir);
-                    if (len < 0.0001) {
-                        len = 0.0001;
-                    }
-                    vec2 dir_n = dir / len;
-                    vec2 normal = vec2(-dir_n.y, dir_n.x);
-                    float half_thick = in_thickness * 0.5 * u_thickness_scale;
-                    float along = (in_pos.x + 1.0) * 0.5 * len;
-                    vec2 world = in_start + dir_n * along + normal * (in_pos.y * half_thick);
-                    vec2 ndc = vec2((world.x / u_resolution.x) * 2.0 - 1.0,
-                                    (world.y / u_resolution.y) * 2.0 - 1.0);
-                    gl_Position = vec4(ndc, 0.0, 1.0);
-                    v_local = vec2((in_pos.x + 1.0) * 0.5, in_pos.y);
+                    mat4 transform = mat4(in_transform_0, in_transform_1, in_transform_2, in_transform_3);
+                    float along = (in_pos.x + 1.0) * 0.5;
+                    float lateral = in_pos.y * u_thickness_scale;
+                    vec3 local = vec3(along, lateral, 0.0);
+                    vec4 world = transform * vec4(local, 1.0);
+                    gl_Position = u_proj * u_view * world;
+                    v_local = vec2(along, lateral);
                     v_color = in_color;
-                    float along_uv = (in_pos.x + 1.0) * 0.5;
-                    v_uv = vec2(mix(in_uv_range.x, in_uv_range.y, along_uv), (in_pos.y * 0.5 + 0.5));
+                    v_uv = vec2(mix(in_uv_range.x, in_uv_range.y, along), (in_pos.y * 0.5 + 0.5));
                     v_bark_tint = in_bark_tint;
                     v_roughness = in_roughness;
+                    v_world_pos = world.xyz;
+                    v_tangent = normalize(in_transform_0.xyz);
+                    v_bitangent = normalize(in_transform_1.xyz);
+                    v_normal = normalize(cross(v_tangent, v_bitangent));
                 }
             """,
             fragment_shader="""
@@ -693,6 +820,10 @@ class OpenGLRenderer:
                 in vec2 v_uv;
                 in vec3 v_bark_tint;
                 in float v_roughness;
+                in vec3 v_world_pos;
+                in vec3 v_tangent;
+                in vec3 v_bitangent;
+                in vec3 v_normal;
 
                 uniform float u_glow;
                 uniform sampler2D u_bark_albedo;
@@ -701,8 +832,42 @@ class OpenGLRenderer:
                 uniform vec2 u_bark_uv_scale;
                 uniform int u_has_normal;
                 uniform int u_has_roughness;
+                uniform vec3 u_camera_pos;
 
                 out vec4 f_color;
+
+                const float PI = 3.14159265;
+
+                float distribution_ggx(vec3 n, vec3 h, float roughness) {
+                    float a = roughness * roughness;
+                    float a2 = a * a;
+                    float n_dot_h = max(dot(n, h), 0.0);
+                    float n_dot_h2 = n_dot_h * n_dot_h;
+                    float denom = (n_dot_h2 * (a2 - 1.0) + 1.0);
+                    return a2 / max(PI * denom * denom, 0.0001);
+                }
+
+                float geometry_schlick_ggx(float n_dot_v, float roughness) {
+                    float r = roughness + 1.0;
+                    float k = (r * r) / 8.0;
+                    return n_dot_v / (n_dot_v * (1.0 - k) + k);
+                }
+
+                float geometry_smith(vec3 n, vec3 v, vec3 l, float roughness) {
+                    float n_dot_v = max(dot(n, v), 0.0);
+                    float n_dot_l = max(dot(n, l), 0.0);
+                    float ggx_v = geometry_schlick_ggx(n_dot_v, roughness);
+                    float ggx_l = geometry_schlick_ggx(n_dot_l, roughness);
+                    return ggx_v * ggx_l;
+                }
+
+                vec3 fresnel_schlick(float cos_theta, vec3 f0) {
+                    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+                }
+
+                vec3 tone_map(vec3 color) {
+                    return color / (color + vec3(1.0));
+                }
 
                 void main() {
                     float edge = abs(v_local.y);
@@ -710,24 +875,36 @@ class OpenGLRenderer:
                     float glow = exp(-edge * 4.0) * u_glow;
                     vec2 bark_uv = vec2(v_uv.x * u_bark_uv_scale.x, v_uv.y * u_bark_uv_scale.y);
                     vec3 albedo = texture(u_bark_albedo, bark_uv).rgb * v_bark_tint;
-                    vec3 normal = vec3(0.0, 0.0, 1.0);
+                    vec3 normal = normalize(v_normal);
                     if (u_has_normal == 1) {
-                        normal = texture(u_bark_normal, bark_uv).xyz * 2.0 - 1.0;
-                        normal = normalize(normal);
+                        vec3 tangent_normal = texture(u_bark_normal, bark_uv).xyz * 2.0 - 1.0;
+                        mat3 tbn = mat3(normalize(v_tangent), normalize(v_bitangent), normalize(v_normal));
+                        normal = normalize(tbn * tangent_normal);
                     }
                     float roughness = v_roughness;
                     if (u_has_roughness == 1) {
                         roughness = clamp(v_roughness * (0.6 + 0.8 * texture(u_bark_roughness, bark_uv).r), 0.05, 1.0);
                     }
-                    vec3 light_dir = normalize(vec3(0.25, 0.4, 0.88));
-                    vec3 view_dir = vec3(0.0, 0.0, 1.0);
-                    vec3 half_dir = normalize(light_dir + view_dir);
-                    float diff = max(dot(normal, light_dir), 0.0);
-                    float spec = pow(max(dot(normal, half_dir), 0.0), mix(6.0, 32.0, 1.0 - roughness));
                     float occlusion = mix(0.65, 1.0, core);
-                    vec3 lit = albedo * (0.35 + diff * 0.75) * occlusion;
-                    lit += spec * (1.0 - roughness) * 0.25;
+                    vec3 view_dir = normalize(u_camera_pos - v_world_pos);
+                    vec3 light_dir = normalize(vec3(0.35, 0.55, 0.78));
+                    vec3 half_dir = normalize(view_dir + light_dir);
+                    float n_dot_l = max(dot(normal, light_dir), 0.0);
+                    float n_dot_v = max(dot(normal, view_dir), 0.0);
+                    vec3 f0 = vec3(0.04);
+                    vec3 fresnel = fresnel_schlick(max(dot(half_dir, view_dir), 0.0), f0);
+                    float d = distribution_ggx(normal, half_dir, roughness);
+                    float g = geometry_smith(normal, view_dir, light_dir, roughness);
+                    vec3 specular = (d * g * fresnel) / max(4.0 * n_dot_v * n_dot_l, 0.001);
+                    vec3 kd = vec3(1.0) - fresnel;
+                    vec3 diffuse = kd * albedo / PI;
+                    vec3 radiance = vec3(1.0);
+                    vec3 lighting = (diffuse + specular) * radiance * n_dot_l;
+                    vec3 ambient = albedo * 0.18;
+                    vec3 lit = (ambient + lighting) * occlusion;
                     lit *= v_color.rgb;
+                    lit = tone_map(lit);
+                    lit = pow(lit, vec3(1.0 / 2.2));
                     float alpha = (v_color.a * core) + glow;
                     f_color = vec4(lit, alpha);
                 }
@@ -750,16 +927,18 @@ class OpenGLRenderer:
             vertex_shader="""
                 #version 330
                 in vec2 in_pos;
-                in vec2 in_center;
-                in float in_size;
-                in float in_rotation;
+                in vec4 in_transform_0;
+                in vec4 in_transform_1;
+                in vec4 in_transform_2;
+                in vec4 in_transform_3;
                 in vec2 in_uv_offset;
                 in vec2 in_uv_scale;
                 in float in_atlas_index;
                 in vec4 in_color;
                 in vec4 in_variance;
 
-                uniform vec2 u_resolution;
+                uniform mat4 u_view;
+                uniform mat4 u_proj;
 
                 out vec2 v_uv;
                 out float v_atlas_index;
@@ -767,14 +946,9 @@ class OpenGLRenderer:
                 out vec4 v_variance;
 
                 void main() {
-                    float c = cos(in_rotation);
-                    float s = sin(in_rotation);
-                    vec2 rotated = vec2(in_pos.x * c - in_pos.y * s,
-                                        in_pos.x * s + in_pos.y * c);
-                    vec2 world = in_center + rotated * in_size;
-                    vec2 ndc = vec2((world.x / u_resolution.x) * 2.0 - 1.0,
-                                    (world.y / u_resolution.y) * 2.0 - 1.0);
-                    gl_Position = vec4(ndc, 0.0, 1.0);
+                    mat4 transform = mat4(in_transform_0, in_transform_1, in_transform_2, in_transform_3);
+                    vec4 world = transform * vec4(in_pos.xy, 0.0, 1.0);
+                    gl_Position = u_proj * u_view * world;
                     vec2 base_uv = in_pos * 0.5 + 0.5;
                     v_uv = in_uv_offset + base_uv * in_uv_scale;
                     v_atlas_index = in_atlas_index;
@@ -795,6 +969,10 @@ class OpenGLRenderer:
 
                 out vec4 f_color;
 
+                vec3 tone_map(vec3 color) {
+                    return color / (color + vec3(1.0));
+                }
+
                 void main() {
                     vec2 grid = max(u_atlas_grid, vec2(1.0));
                     float index = max(v_atlas_index, 0.0);
@@ -809,6 +987,8 @@ class OpenGLRenderer:
                     vec3 tinted = clamp(v_color.rgb * (1.0 + variance), 0.0, 1.0);
                     vec3 rgb = tinted * tex.rgb;
                     rgb *= alpha;
+                    rgb = tone_map(rgb);
+                    rgb = pow(rgb, vec3(1.0 / 2.2));
                     f_color = vec4(rgb, alpha);
                 }
             """,
@@ -954,8 +1134,8 @@ class OpenGLRenderer:
         ]
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
-        self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 48)
-        self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 24)
+        self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 96)
+        self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 72)
         self.bird_instance_vbo = self.ctx.buffer(reserve=4 * 64)
         self.ui_line_instance_vbo = self.ctx.buffer(reserve=4 * 64)
 
@@ -963,8 +1143,8 @@ class OpenGLRenderer:
             self.branch_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.branch_instance_vbo, "2f 2f f 4f 2f 3f f /i",
-                 "in_start", "in_end", "in_thickness", "in_color",
+                (self.branch_instance_vbo, "4f 4f 4f 4f 4f 2f 3f f /i",
+                 "in_transform_0", "in_transform_1", "in_transform_2", "in_transform_3", "in_color",
                  "in_uv_range", "in_bark_tint", "in_roughness"),
             ],
         )
@@ -973,8 +1153,9 @@ class OpenGLRenderer:
             self.leaf_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.leaf_instance_vbo, "2f f f 2f 2f f 4f 4f /i",
-                 "in_center", "in_size", "in_rotation", "in_uv_offset", "in_uv_scale",
+                (self.leaf_instance_vbo, "4f 4f 4f 4f 2f 2f f 4f 4f /i",
+                 "in_transform_0", "in_transform_1", "in_transform_2", "in_transform_3",
+                 "in_uv_offset", "in_uv_scale",
                  "in_atlas_index", "in_color", "in_variance"),
             ],
         )
@@ -1003,6 +1184,9 @@ class OpenGLRenderer:
         width, height = self.window.get_framebuffer_size()
         self.ctx.viewport = (0, 0, width, height)
         self.ctx.clear(0.015, 0.05, 0.11)
+        aspect = width / max(height, 1)
+        view = array('f', self._look_at(self.camera_position, self.camera_target, self.camera_up))
+        proj = array('f', self._perspective(math.radians(45.0), aspect, 10.0, 2000.0))
 
         branch_instances = self.tree.build_branch_instances()
         if branch_instances:
@@ -1010,7 +1194,9 @@ class OpenGLRenderer:
             self.branch_instance_vbo.orphan(len(data) * 4)
             self.branch_instance_vbo.write(data)
 
-            self.branch_program["u_resolution"].value = (width, height)
+            self.branch_program["u_view"].write(view)
+            self.branch_program["u_proj"].write(proj)
+            self.branch_program["u_camera_pos"].value = self.camera_position
             self.branch_program["u_bark_uv_scale"].value = (0.05, 1.0)
             self.branch_program["u_has_normal"].value = 1 if self.has_bark_normal else 0
             self.branch_program["u_has_roughness"].value = 1 if self.has_bark_roughness else 0
@@ -1023,19 +1209,20 @@ class OpenGLRenderer:
 
             self.branch_program["u_thickness_scale"].value = 1.0
             self.branch_program["u_glow"].value = 0.0
-            self.branch_vao.render(instances=len(branch_instances) // 15)
+            self.branch_vao.render(instances=len(branch_instances) // 26)
 
         leaf_instances = self.tree.build_leaf_instances()
         if leaf_instances:
             data = array('f', leaf_instances)
             self.leaf_instance_vbo.orphan(len(data) * 4)
             self.leaf_instance_vbo.write(data)
-            self.leaf_program["u_resolution"].value = (width, height)
+            self.leaf_program["u_view"].write(view)
+            self.leaf_program["u_proj"].write(proj)
             self.leaf_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
             self.leaf_program["u_alpha_cutoff"].value = 0.2
             self.leaf_atlas.use(location=0)
             self.leaf_program["u_leaf_atlas"].value = 0
-            self.leaf_vao.render(instances=len(leaf_instances) // 17)
+            self.leaf_vao.render(instances=len(leaf_instances) // 29)
 
         bird_instances = self.tree.build_bird_instances()
         if bird_instances:
