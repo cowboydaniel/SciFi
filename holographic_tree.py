@@ -106,14 +106,14 @@ class HolographicTree:
         self.attached_leaves: List[AttachedLeaf] = []
 
         self.root_x = width / 2
-        self.root_y = height - 80
+        self.root_y = 80
 
         self.regenerate_tree()
 
     def regenerate_tree(self):
         self.branches.clear()
         self.leaf_rotation_cache.clear()
-        self._gen_branch(-1, -90, 180, 0, 9, 0.0)
+        self._gen_branch(-1, 90, 180, 0, 9, 0.0)
         self.sorted_branches = sorted(self.branches, key=lambda b: b.z_depth)
         self.tip_indices = [i for i, branch in enumerate(self.branches) if branch.depth >= 6]
         self.tip_branches = [self.branches[i] for i in self.tip_indices]
@@ -415,7 +415,11 @@ class OpenGLRenderer:
 
                 void main() {
                     float dist = length(v_uv);
-                    float alpha = exp(-dist * 2.5);
+                    if (dist > 1.0) {
+                        discard;
+                    }
+                    float edge = smoothstep(1.0, 0.8, dist);
+                    float alpha = exp(-dist * 2.5) * edge;
                     f_color = vec4(v_color.rgb, v_color.a * alpha);
                 }
             """,
@@ -498,6 +502,14 @@ class HolographicWindow(pyglet.window.Window):
 
         self.tree = HolographicTree(self.width, self.height)
         self.renderer = OpenGLRenderer(self, self.tree)
+        self.info_label = pyglet.text.Label(
+            "Holographic Tree  •  Press R/Space to regenerate  •  ESC to quit",
+            font_name="Arial",
+            font_size=16,
+            x=30,
+            y=30,
+            color=(120, 235, 255, 180),
+        )
 
         self.last_time = time.perf_counter()
         self.frame_times: List[float] = []
@@ -521,6 +533,7 @@ class HolographicWindow(pyglet.window.Window):
     def on_draw(self):
         self.clear()
         self.renderer.render()
+        self.info_label.draw()
 
 
 def main():
