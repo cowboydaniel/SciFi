@@ -2436,6 +2436,7 @@ class HolographicWindow(pyglet.window.Window):
             fullscreen=True,
             caption="Holographic Tree",
             config=config,
+            vsync=False,
         )
         self.set_mouse_visible(False)
 
@@ -2447,7 +2448,7 @@ class HolographicWindow(pyglet.window.Window):
 
         self.last_time = time.perf_counter()
         self.frame_times: List[float] = []
-        pyglet.clock.schedule_interval(self.update, 1 / 120.0)
+        pyglet.clock.schedule_interval(self.update, 1 / 165.0)
 
     def _init_labels(self):
         margin_x = 30
