@@ -1202,8 +1202,8 @@ class OpenGLRenderer:
         self.alpha_to_coverage_flag = getattr(moderngl, "SAMPLE_ALPHA_TO_COVERAGE", None)
         self.use_alpha_to_coverage = self.ctx.fbo.samples > 1 and self.alpha_to_coverage_flag is not None
 
-        # Debug view mode: 0=final (default), 1=albedo only, 2=normals only
-        self.debug_view_mode = 0
+        # Debug view mode: 0=final with fog, 1=albedo only, 2=normals only, 3=final no fog
+        self.debug_view_mode = 3  # Start in "final no fog" mode to see colors clearly
 
         # Camera positioned for photo-like framing (FOV 40 degrees)
         # Further back and lower to show full tree and ground
@@ -1213,7 +1213,7 @@ class OpenGLRenderer:
         self.light_direction = (0.4, 0.8, 0.35)
         self.light_color = (1.0, 0.98, 0.92)
         self.fog_color = (0.55, 0.68, 0.82)
-        self.fog_density = 0.0016
+        self.fog_density = 0.0003  # Reduced from 0.0016 to make fog much more subtle
 
         self.shadow_size = 2048
         self.shadow_map = self.ctx.depth_texture((self.shadow_size, self.shadow_size))
@@ -1402,9 +1402,14 @@ class OpenGLRenderer:
                     vec3 ambient = albedo * 0.18;
                     vec3 lit = (ambient + lighting) * occlusion;
                     lit *= v_color.rgb;
-                    float dist = length(u_camera_pos - v_world_pos);
-                    float fog = 1.0 - exp(-u_fog_density * dist);
-                    lit = mix(lit, u_fog_color, clamp(fog, 0.0, 1.0));
+
+                    // Apply fog only if not in debug mode 3 (final no fog)
+                    if (u_debug_view != 3) {
+                        float dist = length(u_camera_pos - v_world_pos);
+                        float fog = 1.0 - exp(-u_fog_density * dist);
+                        lit = mix(lit, u_fog_color, clamp(fog, 0.0, 1.0));
+                    }
+
                     lit = tone_map(lit);
                     lit = pow(lit, vec3(1.0 / 2.2));
                     float alpha = (v_color.a * core) + glow;
@@ -1626,10 +1631,12 @@ class OpenGLRenderer:
                     vec3 direct = albedo * diff * shadow * u_light_color;
                     vec3 rgb = ambient * albedo + direct + translucent;
 
-                    // Fog
-                    float dist = length(u_camera_pos - v_world_pos);
-                    float fog = 1.0 - exp(-u_fog_density * dist);
-                    rgb = mix(rgb, u_fog_color, clamp(fog, 0.0, 1.0));
+                    // Apply fog only if not in debug mode 3 (final no fog)
+                    if (u_debug_view != 3) {
+                        float dist = length(u_camera_pos - v_world_pos);
+                        float fog = 1.0 - exp(-u_fog_density * dist);
+                        rgb = mix(rgb, u_fog_color, clamp(fog, 0.0, 1.0));
+                    }
 
                     // Tone mapping
                     rgb = tone_map(rgb);
@@ -1753,10 +1760,12 @@ class OpenGLRenderer:
                     // Combine with contact shadow
                     vec3 rgb = (ambient + direct) * contact_shadow;
 
-                    // Fog
-                    float dist = length(u_camera_pos - v_world_pos);
-                    float fog = 1.0 - exp(-u_fog_density * dist);
-                    rgb = mix(rgb, u_fog_color, clamp(fog, 0.0, 1.0));
+                    // Apply fog only if not in debug mode 3 (final no fog)
+                    if (u_debug_view != 3) {
+                        float dist = length(u_camera_pos - v_world_pos);
+                        float fog = 1.0 - exp(-u_fog_density * dist);
+                        rgb = mix(rgb, u_fog_color, clamp(fog, 0.0, 1.0));
+                    }
 
                     // Tone mapping
                     rgb = tone_map(rgb);
@@ -2429,18 +2438,22 @@ class HolographicWindow(pyglet.window.Window):
             self.close()
         elif symbol in (pyglet.window.key.R, pyglet.window.key.SPACE):
             self.tree.regenerate_tree()
+        elif symbol == pyglet.window.key._0:
+            # Final with fog
+            self.renderer.debug_view_mode = 0
+            print("View: Final shaded WITH fog")
         elif symbol == pyglet.window.key._1:
             # Debug view: albedo only
             self.renderer.debug_view_mode = 1
-            print("Debug view: Albedo only")
+            print("View: Albedo only (no lighting)")
         elif symbol == pyglet.window.key._2:
             # Debug view: normals
             self.renderer.debug_view_mode = 2
-            print("Debug view: Normals")
+            print("View: Normals visualization")
         elif symbol == pyglet.window.key._3:
-            # Debug view: final shaded (default)
-            self.renderer.debug_view_mode = 0
-            print("Debug view: Final shaded")
+            # Debug view: final shaded without fog (default)
+            self.renderer.debug_view_mode = 3
+            print("View: Final shaded WITHOUT fog (default)")
 
     def update(self, _dt):
         now = time.perf_counter()
