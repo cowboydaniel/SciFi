@@ -762,6 +762,26 @@ class OpenGLRenderer:
         )
 
     @staticmethod
+    def _ortho(left: float, right: float, bottom: float, top: float, near: float, far: float) -> tuple[float, ...]:
+        rl = right - left
+        tb = top - bottom
+        fn = far - near
+        return (
+            2.0 / rl, 0.0, 0.0, 0.0,
+            0.0, 2.0 / tb, 0.0, 0.0,
+            0.0, 0.0, -2.0 / fn, 0.0,
+            -(right + left) / rl, -(top + bottom) / tb, -(far + near) / fn, 1.0,
+        )
+
+    @staticmethod
+    def _mul_mat4(a: tuple[float, ...], b: tuple[float, ...]) -> tuple[float, ...]:
+        out = [0.0] * 16
+        for col in range(4):
+            for row in range(4):
+                out[col * 4 + row] = sum(a[k * 4 + row] * b[col * 4 + k] for k in range(4))
+        return tuple(out)
+
+    @staticmethod
     def _build_cylinder_mesh(segments: int = 18) -> List[float]:
         data: List[float] = []
         radius = 0.5
@@ -800,6 +820,7 @@ class OpenGLRenderer:
         self.tree = tree
         self.ctx = moderngl.create_context()
         self.ctx.enable(moderngl.BLEND)
+        self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         self.alpha_to_coverage_flag = getattr(moderngl, "SAMPLE_ALPHA_TO_COVERAGE", None)
         self.use_alpha_to_coverage = self.ctx.fbo.samples > 1 and self.alpha_to_coverage_flag is not None
@@ -807,6 +828,17 @@ class OpenGLRenderer:
         self.camera_position = (tree.w * 0.5, tree.h * 0.6, 520.0)
         self.camera_target = (tree.w * 0.5, tree.h * 0.45, 0.0)
         self.camera_up = (0.0, 1.0, 0.0)
+        self.light_direction = (0.4, 0.8, 0.35)
+        self.light_color = (1.0, 0.98, 0.92)
+        self.fog_color = (0.55, 0.68, 0.82)
+        self.fog_density = 0.0016
+
+        self.shadow_size = 2048
+        self.shadow_map = self.ctx.depth_texture((self.shadow_size, self.shadow_size))
+        self.shadow_map.repeat_x = False
+        self.shadow_map.repeat_y = False
+        self.shadow_map.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self.shadow_fbo = self.ctx.framebuffer(depth_attachment=self.shadow_map)
 
         self.branch_program = self.ctx.program(
             vertex_shader="""
@@ -825,6 +857,7 @@ class OpenGLRenderer:
 
                 uniform mat4 u_view;
                 uniform mat4 u_proj;
+                uniform mat4 u_light_space;
 
                 out vec2 v_local;
                 out vec4 v_color;
@@ -832,6 +865,7 @@ class OpenGLRenderer:
                 out vec3 v_bark_tint;
                 out float v_roughness;
                 out vec3 v_world_pos;
+                out vec4 v_light_space_pos;
                 out vec3 v_tangent;
                 out vec3 v_bitangent;
                 out vec3 v_normal;
@@ -846,6 +880,7 @@ class OpenGLRenderer:
                     v_bark_tint = in_bark_tint;
                     v_roughness = in_roughness;
                     v_world_pos = world.xyz;
+                    v_light_space_pos = u_light_space * world;
                     mat3 normal_mat = transpose(inverse(mat3(transform)));
                     v_normal = normalize(normal_mat * in_normal);
                     v_tangent = normalize(mat3(transform) * in_tangent);
@@ -860,6 +895,7 @@ class OpenGLRenderer:
                 in vec3 v_bark_tint;
                 in float v_roughness;
                 in vec3 v_world_pos;
+                in vec4 v_light_space_pos;
                 in vec3 v_tangent;
                 in vec3 v_bitangent;
                 in vec3 v_normal;
@@ -872,6 +908,12 @@ class OpenGLRenderer:
                 uniform int u_has_normal;
                 uniform int u_has_roughness;
                 uniform vec3 u_camera_pos;
+                uniform sampler2D u_shadow_map;
+                uniform vec2 u_shadow_texel;
+                uniform vec3 u_light_dir;
+                uniform vec3 u_light_color;
+                uniform vec3 u_fog_color;
+                uniform float u_fog_density;
 
                 out vec4 f_color;
 
@@ -908,6 +950,25 @@ class OpenGLRenderer:
                     return color / (color + vec3(1.0));
                 }
 
+                float shadow_pcf(vec4 light_space_pos, vec3 normal, vec3 light_dir) {
+                    vec3 proj = light_space_pos.xyz / light_space_pos.w;
+                    proj = proj * 0.5 + 0.5;
+                    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) {
+                        return 1.0;
+                    }
+                    float bias = max(0.0015 * (1.0 - dot(normal, light_dir)), 0.0007);
+                    float current = proj.z - bias;
+                    float shadow = 0.0;
+                    for (int x = -1; x <= 1; x++) {
+                        for (int y = -1; y <= 1; y++) {
+                            vec2 offset = vec2(x, y) * u_shadow_texel;
+                            float depth = texture(u_shadow_map, proj.xy + offset).r;
+                            shadow += current <= depth ? 1.0 : 0.0;
+                        }
+                    }
+                    return shadow / 9.0;
+                }
+
                 void main() {
                     float edge = abs(v_local.y);
                     float core = smoothstep(1.0, 0.0, edge);
@@ -926,7 +987,7 @@ class OpenGLRenderer:
                     }
                     float occlusion = mix(0.65, 1.0, core);
                     vec3 view_dir = normalize(u_camera_pos - v_world_pos);
-                    vec3 light_dir = normalize(vec3(0.35, 0.55, 0.78));
+                    vec3 light_dir = normalize(u_light_dir);
                     vec3 half_dir = normalize(view_dir + light_dir);
                     float n_dot_l = max(dot(normal, light_dir), 0.0);
                     float n_dot_v = max(dot(normal, view_dir), 0.0);
@@ -937,11 +998,15 @@ class OpenGLRenderer:
                     vec3 specular = (d * g * fresnel) / max(4.0 * n_dot_v * n_dot_l, 0.001);
                     vec3 kd = vec3(1.0) - fresnel;
                     vec3 diffuse = kd * albedo / PI;
-                    vec3 radiance = vec3(1.0);
-                    vec3 lighting = (diffuse + specular) * radiance * n_dot_l;
+                    float shadow = shadow_pcf(v_light_space_pos, normal, light_dir);
+                    vec3 radiance = u_light_color;
+                    vec3 lighting = (diffuse + specular) * radiance * n_dot_l * shadow;
                     vec3 ambient = albedo * 0.18;
                     vec3 lit = (ambient + lighting) * occlusion;
                     lit *= v_color.rgb;
+                    float dist = length(u_camera_pos - v_world_pos);
+                    float fog = 1.0 - exp(-u_fog_density * dist);
+                    lit = mix(lit, u_fog_color, clamp(fog, 0.0, 1.0));
                     lit = tone_map(lit);
                     lit = pow(lit, vec3(1.0 / 2.2));
                     float alpha = (v_color.a * core) + glow;
@@ -978,12 +1043,15 @@ class OpenGLRenderer:
 
                 uniform mat4 u_view;
                 uniform mat4 u_proj;
+                uniform mat4 u_light_space;
 
                 out vec2 v_uv;
                 out float v_atlas_index;
                 out vec4 v_color;
                 out vec4 v_variance;
                 out vec3 v_normal;
+                out vec3 v_world_pos;
+                out vec4 v_light_space_pos;
 
                 void main() {
                     vec3 offset = in_axis_x * in_pos.x + in_axis_y * in_pos.y;
@@ -995,6 +1063,8 @@ class OpenGLRenderer:
                     v_color = in_color;
                     v_variance = in_variance;
                     v_normal = normalize(in_axis_z);
+                    v_world_pos = world.xyz;
+                    v_light_space_pos = u_light_space * world;
                 }
             """,
             fragment_shader="""
@@ -1004,15 +1074,43 @@ class OpenGLRenderer:
                 in vec4 v_color;
                 in vec4 v_variance;
                 in vec3 v_normal;
+                in vec3 v_world_pos;
+                in vec4 v_light_space_pos;
 
                 uniform sampler2D u_leaf_atlas;
                 uniform vec2 u_atlas_grid;
                 uniform float u_alpha_cutoff;
+                uniform sampler2D u_shadow_map;
+                uniform vec2 u_shadow_texel;
+                uniform vec3 u_light_dir;
+                uniform vec3 u_light_color;
+                uniform vec3 u_camera_pos;
+                uniform vec3 u_fog_color;
+                uniform float u_fog_density;
 
                 out vec4 f_color;
 
                 vec3 tone_map(vec3 color) {
                     return color / (color + vec3(1.0));
+                }
+
+                float shadow_pcf(vec4 light_space_pos, vec3 normal, vec3 light_dir) {
+                    vec3 proj = light_space_pos.xyz / light_space_pos.w;
+                    proj = proj * 0.5 + 0.5;
+                    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) {
+                        return 1.0;
+                    }
+                    float bias = max(0.0015 * (1.0 - dot(normal, light_dir)), 0.0007);
+                    float current = proj.z - bias;
+                    float shadow = 0.0;
+                    for (int x = -1; x <= 1; x++) {
+                        for (int y = -1; y <= 1; y++) {
+                            vec2 offset = vec2(x, y) * u_shadow_texel;
+                            float depth = texture(u_shadow_map, proj.xy + offset).r;
+                            shadow += current <= depth ? 1.0 : 0.0;
+                        }
+                    }
+                    return shadow / 9.0;
                 }
 
                 void main() {
@@ -1029,10 +1127,231 @@ class OpenGLRenderer:
                     vec3 variance = v_variance.xyz * v_variance.w;
                     vec3 tinted = clamp(v_color.rgb * (1.0 + variance), 0.0, 1.0);
                     vec3 rgb = tinted * tex.rgb;
-                    rgb *= alpha;
+                    vec3 normal = normalize(v_normal);
+                    vec3 light_dir = normalize(u_light_dir);
+                    float shadow = shadow_pcf(v_light_space_pos, normal, light_dir);
+                    float diff = max(dot(normal, light_dir), 0.0);
+                    vec3 lighting = (0.25 + diff * 0.75 * shadow) * u_light_color;
+                    rgb *= lighting;
+                    float dist = length(u_camera_pos - v_world_pos);
+                    float fog = 1.0 - exp(-u_fog_density * dist);
+                    rgb = mix(rgb, u_fog_color, clamp(fog, 0.0, 1.0));
                     rgb = tone_map(rgb);
                     rgb = pow(rgb, vec3(1.0 / 2.2));
+                    rgb *= alpha;
                     f_color = vec4(rgb, alpha);
+                }
+            """,
+        )
+
+        self.ground_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec3 in_pos;
+                in vec3 in_normal;
+                in vec2 in_uv;
+
+                uniform mat4 u_view;
+                uniform mat4 u_proj;
+                uniform mat4 u_light_space;
+
+                out vec3 v_world_pos;
+                out vec3 v_normal;
+                out vec2 v_uv;
+                out vec4 v_light_space_pos;
+
+                void main() {
+                    vec4 world = vec4(in_pos, 1.0);
+                    gl_Position = u_proj * u_view * world;
+                    v_world_pos = world.xyz;
+                    v_normal = normalize(in_normal);
+                    v_uv = in_uv;
+                    v_light_space_pos = u_light_space * world;
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                in vec3 v_world_pos;
+                in vec3 v_normal;
+                in vec2 v_uv;
+                in vec4 v_light_space_pos;
+
+                uniform sampler2D u_shadow_map;
+                uniform vec2 u_shadow_texel;
+                uniform vec3 u_light_dir;
+                uniform vec3 u_light_color;
+                uniform vec3 u_camera_pos;
+                uniform vec3 u_fog_color;
+                uniform float u_fog_density;
+
+                out vec4 f_color;
+
+                vec3 tone_map(vec3 color) {
+                    return color / (color + vec3(1.0));
+                }
+
+                float shadow_pcf(vec4 light_space_pos, vec3 normal, vec3 light_dir) {
+                    vec3 proj = light_space_pos.xyz / light_space_pos.w;
+                    proj = proj * 0.5 + 0.5;
+                    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) {
+                        return 1.0;
+                    }
+                    float bias = max(0.0015 * (1.0 - dot(normal, light_dir)), 0.0007);
+                    float current = proj.z - bias;
+                    float shadow = 0.0;
+                    for (int x = -1; x <= 1; x++) {
+                        for (int y = -1; y <= 1; y++) {
+                            vec2 offset = vec2(x, y) * u_shadow_texel;
+                            float depth = texture(u_shadow_map, proj.xy + offset).r;
+                            shadow += current <= depth ? 1.0 : 0.0;
+                        }
+                    }
+                    return shadow / 9.0;
+                }
+
+                void main() {
+                    vec3 light_dir = normalize(u_light_dir);
+                    vec3 normal = normalize(v_normal);
+                    float diff = max(dot(normal, light_dir), 0.0);
+                    float shadow = shadow_pcf(v_light_space_pos, normal, light_dir);
+                    vec2 grass_uv = v_uv * 6.0;
+                    float patch = sin(grass_uv.x) * cos(grass_uv.y);
+                    float variation = 0.5 + 0.5 * sin(grass_uv.x * 0.7 + grass_uv.y * 0.9);
+                    vec3 base = mix(vec3(0.12, 0.32, 0.12), vec3(0.18, 0.45, 0.2), variation);
+                    base += patch * 0.03;
+                    vec3 ambient = base * 0.2;
+                    vec3 lighting = ambient + base * diff * shadow * u_light_color;
+                    float dist = length(u_camera_pos - v_world_pos);
+                    float fog = 1.0 - exp(-u_fog_density * dist);
+                    vec3 color = mix(lighting, u_fog_color, clamp(fog, 0.0, 1.0));
+                    color = tone_map(color);
+                    color = pow(color, vec3(1.0 / 2.2));
+                    f_color = vec4(color, 1.0);
+                }
+            """,
+        )
+
+        self.sky_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec2 in_pos;
+                out vec2 v_uv;
+
+                void main() {
+                    gl_Position = vec4(in_pos, 0.0, 1.0);
+                    v_uv = in_pos * 0.5 + 0.5;
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                in vec2 v_uv;
+                uniform vec3 u_sky_top;
+                uniform vec3 u_sky_bottom;
+                out vec4 f_color;
+
+                void main() {
+                    float t = smoothstep(0.0, 1.0, v_uv.y);
+                    vec3 color = mix(u_sky_bottom, u_sky_top, t);
+                    f_color = vec4(color, 1.0);
+                }
+            """,
+        )
+
+        self.branch_shadow_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec3 in_pos;
+                in vec3 in_normal;
+                in vec2 in_uv;
+                in vec3 in_tangent;
+                in vec4 in_transform_0;
+                in vec4 in_transform_1;
+                in vec4 in_transform_2;
+                in vec4 in_transform_3;
+                in vec4 in_color;
+                in vec3 in_bark_tint;
+                in float in_roughness;
+
+                uniform mat4 u_light_space;
+
+                void main() {
+                    mat4 transform = mat4(in_transform_0, in_transform_1, in_transform_2, in_transform_3);
+                    vec4 world = transform * vec4(in_pos, 1.0);
+                    gl_Position = u_light_space * world;
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                void main() {
+                }
+            """,
+        )
+
+        self.leaf_shadow_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec2 in_pos;
+                in vec3 in_center;
+                in vec3 in_axis_x;
+                in vec3 in_axis_y;
+                in vec3 in_axis_z;
+                in vec2 in_uv_offset;
+                in vec2 in_uv_scale;
+                in float in_atlas_index;
+                in vec4 in_color;
+                in vec4 in_variance;
+
+                uniform mat4 u_light_space;
+
+                out vec2 v_uv;
+                out float v_atlas_index;
+
+                void main() {
+                    vec3 offset = in_axis_x * in_pos.x + in_axis_y * in_pos.y;
+                    vec4 world = vec4(in_center + offset, 1.0);
+                    gl_Position = u_light_space * world;
+                    vec2 base_uv = in_pos * 0.5 + 0.5;
+                    v_uv = in_uv_offset + base_uv * in_uv_scale;
+                    v_atlas_index = in_atlas_index;
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                in vec2 v_uv;
+                in float v_atlas_index;
+
+                uniform sampler2D u_leaf_atlas;
+                uniform vec2 u_atlas_grid;
+                uniform float u_alpha_cutoff;
+
+                void main() {
+                    vec2 grid = max(u_atlas_grid, vec2(1.0));
+                    float index = max(v_atlas_index, 0.0);
+                    vec2 cell = vec2(mod(index, grid.x), floor(index / grid.x));
+                    vec2 atlas_uv = (cell + clamp(v_uv, 0.0, 1.0)) / grid;
+                    float alpha = texture(u_leaf_atlas, atlas_uv).a;
+                    if (alpha < u_alpha_cutoff) {
+                        discard;
+                    }
+                }
+            """,
+        )
+
+        self.ground_shadow_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec3 in_pos;
+                in vec3 in_normal;
+                in vec2 in_uv;
+                uniform mat4 u_light_space;
+
+                void main() {
+                    gl_Position = u_light_space * vec4(in_pos, 1.0);
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                void main() {
                 }
             """,
         )
@@ -1180,6 +1499,18 @@ class OpenGLRenderer:
         self.cylinder_vbo = self.ctx.buffer(data=array('f', cylinder))
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
+        ground_size = 2200.0
+        ground_y = 0.0
+        ground = [
+            -ground_size, ground_y, -ground_size, 0.0, 1.0, 0.0, 0.0, 0.0,
+            ground_size, ground_y, -ground_size, 0.0, 1.0, 0.0, 1.0, 0.0,
+            ground_size, ground_y, ground_size, 0.0, 1.0, 0.0, 1.0, 1.0,
+            -ground_size, ground_y, -ground_size, 0.0, 1.0, 0.0, 0.0, 0.0,
+            ground_size, ground_y, ground_size, 0.0, 1.0, 0.0, 1.0, 1.0,
+            -ground_size, ground_y, ground_size, 0.0, 1.0, 0.0, 0.0, 1.0,
+        ]
+        self.ground_vbo = self.ctx.buffer(data=array('f', ground))
+
         self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 96)
         self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 128)
         self.bird_instance_vbo = self.ctx.buffer(reserve=4 * 64)
@@ -1206,6 +1537,42 @@ class OpenGLRenderer:
             ],
         )
 
+        self.ground_vao = self.ctx.vertex_array(
+            self.ground_program,
+            [(self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv")],
+        )
+
+        self.sky_vao = self.ctx.vertex_array(
+            self.sky_program,
+            [(self.quad_vbo, "2f", "in_pos")],
+        )
+
+        self.branch_shadow_vao = self.ctx.vertex_array(
+            self.branch_shadow_program,
+            [
+                (self.cylinder_vbo, "3f 3f 2f 3f", "in_pos", "in_normal", "in_uv", "in_tangent"),
+                (self.branch_instance_vbo, "4f 4f 4f 4f 4f 3f f /i",
+                 "in_transform_0", "in_transform_1", "in_transform_2", "in_transform_3", "in_color",
+                 "in_bark_tint", "in_roughness"),
+            ],
+        )
+
+        self.leaf_shadow_vao = self.ctx.vertex_array(
+            self.leaf_shadow_program,
+            [
+                (self.quad_vbo, "2f", "in_pos"),
+                (self.leaf_instance_vbo, "3f 3f 3f 3f 2f 2f f 4f 4f /i",
+                 "in_center", "in_axis_x", "in_axis_y", "in_axis_z",
+                 "in_uv_offset", "in_uv_scale",
+                 "in_atlas_index", "in_color", "in_variance"),
+            ],
+        )
+
+        self.ground_shadow_vao = self.ctx.vertex_array(
+            self.ground_shadow_program,
+            [(self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv")],
+        )
+
         self.bird_vao = self.ctx.vertex_array(
             self.bird_program,
             [
@@ -1228,11 +1595,25 @@ class OpenGLRenderer:
 
     def render(self):
         width, height = self.window.get_framebuffer_size()
-        self.ctx.viewport = (0, 0, width, height)
-        self.ctx.clear(0.015, 0.05, 0.11)
         aspect = width / max(height, 1)
         view = array('f', self._look_at(self.camera_position, self.camera_target, self.camera_up))
         proj = array('f', self._perspective(math.radians(45.0), aspect, 10.0, 2000.0))
+        light_target = (self.tree.w * 0.5, self.tree.h * 0.4, 0.0)
+        light_dir = self.light_direction
+        light_distance = 1200.0
+        light_pos = (
+            light_target[0] - light_dir[0] * light_distance,
+            light_target[1] - light_dir[1] * light_distance,
+            light_target[2] - light_dir[2] * light_distance,
+        )
+        light_view = self._look_at(light_pos, light_target, (0.0, 1.0, 0.0))
+        ortho_extent = 900.0
+        light_proj = self._ortho(
+            -ortho_extent, ortho_extent,
+            -ortho_extent, ortho_extent,
+            -1200.0, 1600.0,
+        )
+        light_space = array('f', self._mul_mat4(light_proj, light_view))
 
         branch_instances = self.tree.build_branch_instances()
         if branch_instances:
@@ -1240,23 +1621,8 @@ class OpenGLRenderer:
             self.branch_instance_vbo.orphan(len(data) * 4)
             self.branch_instance_vbo.write(data)
 
-            self.branch_program["u_view"].write(view)
-            self.branch_program["u_proj"].write(proj)
-            self.branch_program["u_camera_pos"].value = self.camera_position
-            self.branch_program["u_bark_uv_scale"].value = (0.05, 1.0)
-            self.branch_program["u_has_normal"].value = 1 if self.has_bark_normal else 0
-            self.branch_program["u_has_roughness"].value = 1 if self.has_bark_roughness else 0
-            self.bark_albedo.use(location=0)
-            self.bark_normal.use(location=1)
-            self.bark_roughness.use(location=2)
-            self.branch_program["u_bark_albedo"].value = 0
-            self.branch_program["u_bark_normal"].value = 1
-            self.branch_program["u_bark_roughness"].value = 2
-
-            self.branch_program["u_glow"].value = 0.0
-            self.branch_vao.render(instances=len(branch_instances) // 24)
-
         leaf_instances = self.tree.build_leaf_instances()
+        leaf_data: List[float] = []
         if leaf_instances:
             if self.use_alpha_to_coverage:
                 self.ctx.enable(self.alpha_to_coverage_flag)
@@ -1270,7 +1636,6 @@ class OpenGLRenderer:
                     + (inst.position[2] - cz) ** 2,
                     reverse=True,
                 )
-            leaf_data: List[float] = []
             for leaf in leaf_instances:
                 leaf_data.extend([
                     *leaf.position,
@@ -1287,16 +1652,91 @@ class OpenGLRenderer:
             data = array('f', leaf_data)
             self.leaf_instance_vbo.orphan(len(data) * 4)
             self.leaf_instance_vbo.write(data)
+
+        self.shadow_fbo.use()
+        self.ctx.viewport = (0, 0, self.shadow_size, self.shadow_size)
+        self.ctx.clear(depth=1.0)
+        if branch_instances:
+            self.branch_shadow_program["u_light_space"].write(light_space)
+            self.branch_shadow_vao.render(instances=len(branch_instances) // 24)
+        if leaf_data:
+            self.leaf_shadow_program["u_light_space"].write(light_space)
+            self.leaf_shadow_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
+            self.leaf_shadow_program["u_alpha_cutoff"].value = 0.2
+            self.leaf_atlas.use(location=0)
+            self.leaf_shadow_program["u_leaf_atlas"].value = 0
+            self.leaf_shadow_vao.render(instances=len(leaf_data) // 25)
+        self.ground_shadow_program["u_light_space"].write(light_space)
+        self.ground_shadow_vao.render()
+
+        self.ctx.screen.use()
+        self.ctx.viewport = (0, 0, width, height)
+        self.ctx.clear(0.015, 0.05, 0.11, depth=1.0)
+        self.ctx.disable(moderngl.DEPTH_TEST)
+        self.sky_program["u_sky_top"].value = (0.18, 0.28, 0.5)
+        self.sky_program["u_sky_bottom"].value = self.fog_color
+        self.sky_vao.render()
+        self.ctx.enable(moderngl.DEPTH_TEST)
+
+        self.shadow_map.use(location=3)
+        shadow_texel = (1.0 / self.shadow_size, 1.0 / self.shadow_size)
+
+        self.ground_program["u_view"].write(view)
+        self.ground_program["u_proj"].write(proj)
+        self.ground_program["u_light_space"].write(light_space)
+        self.ground_program["u_shadow_map"].value = 3
+        self.ground_program["u_shadow_texel"].value = shadow_texel
+        self.ground_program["u_light_dir"].value = self.light_direction
+        self.ground_program["u_light_color"].value = self.light_color
+        self.ground_program["u_camera_pos"].value = self.camera_position
+        self.ground_program["u_fog_color"].value = self.fog_color
+        self.ground_program["u_fog_density"].value = self.fog_density
+        self.ground_vao.render()
+
+        if branch_instances:
+            self.branch_program["u_view"].write(view)
+            self.branch_program["u_proj"].write(proj)
+            self.branch_program["u_light_space"].write(light_space)
+            self.branch_program["u_camera_pos"].value = self.camera_position
+            self.branch_program["u_bark_uv_scale"].value = (0.05, 1.0)
+            self.branch_program["u_has_normal"].value = 1 if self.has_bark_normal else 0
+            self.branch_program["u_has_roughness"].value = 1 if self.has_bark_roughness else 0
+            self.bark_albedo.use(location=0)
+            self.bark_normal.use(location=1)
+            self.bark_roughness.use(location=2)
+            self.branch_program["u_bark_albedo"].value = 0
+            self.branch_program["u_bark_normal"].value = 1
+            self.branch_program["u_bark_roughness"].value = 2
+            self.branch_program["u_shadow_map"].value = 3
+            self.branch_program["u_shadow_texel"].value = shadow_texel
+            self.branch_program["u_light_dir"].value = self.light_direction
+            self.branch_program["u_light_color"].value = self.light_color
+            self.branch_program["u_fog_color"].value = self.fog_color
+            self.branch_program["u_fog_density"].value = self.fog_density
+
+            self.branch_program["u_glow"].value = 0.0
+            self.branch_vao.render(instances=len(branch_instances) // 24)
+
+        if leaf_data:
             self.leaf_program["u_view"].write(view)
             self.leaf_program["u_proj"].write(proj)
+            self.leaf_program["u_light_space"].write(light_space)
             self.leaf_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
             self.leaf_program["u_alpha_cutoff"].value = 0.2
             self.leaf_atlas.use(location=0)
             self.leaf_program["u_leaf_atlas"].value = 0
+            self.leaf_program["u_shadow_map"].value = 3
+            self.leaf_program["u_shadow_texel"].value = shadow_texel
+            self.leaf_program["u_light_dir"].value = self.light_direction
+            self.leaf_program["u_light_color"].value = self.light_color
+            self.leaf_program["u_camera_pos"].value = self.camera_position
+            self.leaf_program["u_fog_color"].value = self.fog_color
+            self.leaf_program["u_fog_density"].value = self.fog_density
             self.leaf_vao.render(instances=len(leaf_data) // 25)
             if self.use_alpha_to_coverage:
                 self.ctx.disable(self.alpha_to_coverage_flag)
 
+        self.ctx.disable(moderngl.DEPTH_TEST)
         bird_instances = self.tree.build_bird_instances()
         if bird_instances:
             data = array('f', bird_instances)
