@@ -455,12 +455,16 @@ class HolographicTree:
             size = leaf.size * (0.7 + (branch.z_depth + 1) * 0.15)
             zf = (branch.z_depth + 1) / 2
             color = (0.6 + zf * 0.4, 0.95, 1.0, 0.6 * f)
-            instances.extend([attach_x, attach_y, size, math.radians(angle), *color])
+            stem_length = 0.5
+            tip_height = 0.7
+            instances.extend([attach_x, attach_y, size, math.radians(angle), stem_length, tip_height, *color])
 
         for lf in self.falling_leaves:
             size = lf.size * (0.8 + (lf.z + 1) * 0.2)
             color = (0.6, 0.9, 1.0, lf.alpha * f)
-            instances.extend([lf.x, lf.y, size, math.radians(lf.rotation), *color])
+            stem_length = 0.5
+            tip_height = 0.7
+            instances.extend([lf.x, lf.y, size, math.radians(lf.rotation), stem_length, tip_height, *color])
 
         return instances
 
@@ -547,11 +551,13 @@ class OpenGLRenderer:
                 in vec2 in_center;
                 in float in_size;
                 in float in_rotation;
+                in vec2 in_shape;
                 in vec4 in_color;
 
                 uniform vec2 u_resolution;
 
                 out vec2 v_uv;
+                out vec2 v_shape;
                 out vec4 v_color;
 
                 void main() {
@@ -564,27 +570,73 @@ class OpenGLRenderer:
                                     (world.y / u_resolution.y) * 2.0 - 1.0);
                     gl_Position = vec4(ndc, 0.0, 1.0);
                     v_uv = in_pos;
+                    v_shape = in_shape;
                     v_color = in_color;
                 }
             """,
             fragment_shader="""
                 #version 330
                 in vec2 v_uv;
+                in vec2 v_shape;
                 in vec4 v_color;
 
                 out vec4 f_color;
 
+                float sdSegment(vec2 p, vec2 a, vec2 b) {
+                    vec2 pa = p - a;
+                    vec2 ba = b - a;
+                    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+                    return length(pa - ba * h);
+                }
+
+                float sdTriangle(vec2 p, vec2 a, vec2 b, vec2 c) {
+                    vec2 e0 = b - a;
+                    vec2 e1 = c - b;
+                    vec2 e2 = a - c;
+                    vec2 v0 = p - a;
+                    vec2 v1 = p - b;
+                    vec2 v2 = p - c;
+                    vec2 pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+                    vec2 pq1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+                    vec2 pq2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+                    float s = sign(e0.x * e2.y - e0.y * e2.x);
+                    float d = min(min(dot(pq0, pq0), dot(pq1, pq1)), dot(pq2, pq2));
+                    float side = min(min(s * (v0.x * e0.y - v0.y * e0.x),
+                                         s * (v1.x * e1.y - v1.y * e1.x)),
+                                     s * (v2.x * e2.y - v2.y * e2.x));
+                    return sqrt(d) * sign(side);
+                }
+
                 void main() {
-                    float t = clamp((v_uv.y + 1.0) * 0.5, 0.0, 1.0);
-                    float half_width = mix(0.9, 0.12, t);
-                    if (abs(v_uv.x) > half_width || v_uv.y < -1.0 || v_uv.y > 1.0) {
+                    vec2 p = v_uv * 2.0;
+                    vec2 body_center = vec2(0.0, 0.2);
+                    vec2 body_radius = vec2(0.65, 0.95);
+                    vec2 body_d = (p - body_center) / body_radius;
+                    float body_metric = dot(body_d, body_d) - 1.0;
+                    float body_edge = smoothstep(0.08, -0.03, body_metric);
+                    float body_fill = clamp(1.0 - dot(body_d, body_d), 0.0, 1.0);
+
+                    float tip_height = v_shape.y;
+                    vec2 tip_a = vec2(0.0, -0.75 - tip_height);
+                    vec2 tip_b = vec2(0.455, -0.37);
+                    vec2 tip_c = vec2(-0.455, -0.37);
+                    float tip_dist = sdTriangle(p, tip_a, tip_b, tip_c);
+                    float tip_edge = smoothstep(0.08, -0.03, tip_dist);
+
+                    float stem_length = v_shape.x;
+                    vec2 stem_start = vec2(0.0, 1.15);
+                    vec2 stem_end = vec2(0.0, 1.15 + stem_length);
+                    float stem_width = 0.16;
+                    float stem_dist = sdSegment(p, stem_start, stem_end) - stem_width * 0.5;
+                    float stem_edge = smoothstep(0.06, -0.02, stem_dist);
+
+                    float alpha = max(max(body_edge, tip_edge), stem_edge * 0.85);
+                    if (alpha < 0.01) {
                         discard;
                     }
-                    float x_norm = v_uv.x / max(half_width, 0.0001);
-                    float y_norm = (v_uv.y + 0.25) / 1.15;
-                    float dist = x_norm * x_norm + y_norm * y_norm;
-                    float edge = smoothstep(1.0, 0.72, dist);
-                    float alpha = exp(-dist * 2.2) * edge;
+
+                    float inner_glow = mix(0.65, 1.0, body_fill);
+                    alpha *= inner_glow;
                     f_color = vec4(v_color.rgb, v_color.a * alpha);
                 }
             """,
@@ -760,8 +812,8 @@ class OpenGLRenderer:
             self.leaf_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.leaf_instance_vbo, "2f f f 4f /i",
-                 "in_center", "in_size", "in_rotation", "in_color"),
+                (self.leaf_instance_vbo, "2f f f 2f 4f /i",
+                 "in_center", "in_size", "in_rotation", "in_shape", "in_color"),
             ],
         )
 
@@ -811,7 +863,7 @@ class OpenGLRenderer:
             self.leaf_instance_vbo.orphan(len(data) * 4)
             self.leaf_instance_vbo.write(data)
             self.leaf_program["u_resolution"].value = (width, height)
-            self.leaf_vao.render(instances=len(leaf_instances) // 8)
+            self.leaf_vao.render(instances=len(leaf_instances) // 10)
 
         bird_instances = self.tree.build_bird_instances()
         if bird_instances:
