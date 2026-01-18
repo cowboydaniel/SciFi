@@ -978,10 +978,6 @@ class OpenGLRenderer:
             self.branch_program["u_bark_normal"].value = 1
             self.branch_program["u_bark_roughness"].value = 2
 
-            self.branch_program["u_thickness_scale"].value = 3.0
-            self.branch_program["u_glow"].value = 0.6
-            self.branch_vao.render(instances=len(branch_instances) // 15)
-
             self.branch_program["u_thickness_scale"].value = 1.0
             self.branch_program["u_glow"].value = 0.0
             self.branch_vao.render(instances=len(branch_instances) // 15)
