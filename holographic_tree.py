@@ -9,7 +9,7 @@ import pygame.gfxdraw
 import math
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 
@@ -57,6 +57,10 @@ class Branch:
     start_y: float = 0.0
     end_x: float = 0.0
     end_y: float = 0.0
+    segment_fracs: List[float] = field(default_factory=list)
+    segment_jitter: List[float] = field(default_factory=list)
+    segment_sway: List[float] = field(default_factory=list)
+    segment_points: List[tuple] = field(default_factory=list)
 
 
 class WindSystem:
@@ -163,6 +167,13 @@ class HolographicTree:
         nz = max(-1, min(1, z + random.uniform(-0.1, 0.1)))
         b = Branch(parent, angle, length, max(2, (max_d - depth) * 2.5),
                    depth, nz, stiff, depth * 0.3 + random.random() * 0.5)
+        point_count = random.randint(3, 6)
+        segment_count = max(2, point_count - 1)
+        weights = [random.uniform(0.6, 1.4) for _ in range(segment_count)]
+        total = sum(weights)
+        b.segment_fracs = [w / total for w in weights]
+        b.segment_jitter = [random.uniform(-8, 8) for _ in range(segment_count)]
+        b.segment_sway = [random.uniform(0.4, 1.0) for _ in range(segment_count)]
         idx = len(self.branches)
         self.branches.append(b)
         spread = 24 + depth * 2
@@ -185,15 +196,31 @@ class HolographicTree:
                 b.start_x, b.start_y = p.end_x, p.end_y
 
             flex = 1.0 - b.stiffness
-            wind = self.wind.get_force(b.start_y, self.h)
             wave = math.sin(self.time * 2.5 - b.phase_offset) * 0.3
-            b.current_angle = b.base_angle + wind * flex * (1 + wave)
-            b.current_angle += math.sin(self.time * 1.8 + b.phase_offset * 2) * 2 * flex
-
-            rad = math.radians(b.current_angle)
             scale = 1.0 + b.z_depth * 0.15
-            b.end_x = b.start_x + b.length * scale * math.cos(rad)
-            b.end_y = b.start_y + b.length * scale * math.sin(rad)
+            length = b.length * scale
+            base_angle = b.base_angle + math.sin(self.time * 1.8 + b.phase_offset * 2) * 2 * flex
+
+            points = [(b.start_x, b.start_y)]
+            x, y = b.start_x, b.start_y
+            current_angle = base_angle
+            segment_fracs = b.segment_fracs or [1.0]
+            segment_jitter = b.segment_jitter or [0.0] * len(segment_fracs)
+            segment_sway = b.segment_sway or [1.0] * len(segment_fracs)
+            for i, frac in enumerate(segment_fracs):
+                seg_len = length * frac
+                local_wind = self.wind.get_force(y, self.h)
+                sway = local_wind * flex * segment_sway[i] * (1 + wave)
+                wobble = math.sin(self.time * 2.5 - b.phase_offset + i * 0.5) * 1.2
+                current_angle = base_angle + segment_jitter[i] + sway + wobble
+                rad = math.radians(current_angle)
+                x += seg_len * math.cos(rad)
+                y += seg_len * math.sin(rad)
+                points.append((x, y))
+
+            b.current_angle = current_angle
+            b.segment_points = points
+            b.end_x, b.end_y = points[-1]
 
         # Flicker
         self.flicker = 0.88 + 0.12 * math.sin(self.time * 10)
@@ -283,8 +310,11 @@ class HolographicTree:
         # Tree glow (using thick antialiased lines)
         for b in self.sorted_branches:
             glow_thick = int(b.thickness + 6)
-            self.draw_thick_aaline(screen, (0, int(80 * f), int(120 * f)),
-                                  b.start_x, b.start_y, b.end_x, b.end_y, glow_thick)
+            points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
+            for i in range(len(points) - 1):
+                self.draw_thick_aaline(screen, (0, int(80 * f), int(120 * f)),
+                                      points[i][0], points[i][1], points[i + 1][0], points[i + 1][1],
+                                      glow_thick)
 
         # Tree branches
         for b in self.sorted_branches:
@@ -296,15 +326,19 @@ class HolographicTree:
             th = max(1, int(b.thickness * (0.85 + zf * 0.3)))
 
             # Draw thick antialiased branch
-            self.draw_thick_aaline(screen, (r, g, blue),
-                                  b.start_x, b.start_y, b.end_x, b.end_y, th)
+            points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
+            for i in range(len(points) - 1):
+                self.draw_thick_aaline(screen, (r, g, blue),
+                                      points[i][0], points[i][1], points[i + 1][0], points[i + 1][1], th)
 
             # Core highlight
             if b.thickness > 4:
                 core_th = max(1, th // 3)
                 ca = int(220 * pulse)
-                self.draw_thick_aaline(screen, (ca, 255, 255),
-                                      b.start_x, b.start_y, b.end_x, b.end_y, core_th)
+                for i in range(len(points) - 1):
+                    self.draw_thick_aaline(screen, (ca, 255, 255),
+                                          points[i][0], points[i][1], points[i + 1][0], points[i + 1][1],
+                                          core_th)
 
         # Particles with cached glow surfaces
         for p in self.particles:
