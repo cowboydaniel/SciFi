@@ -31,15 +31,19 @@ def _fbm_noise(x, y, octaves=4, persistence=0.5, scale=1.0, seed=0):
     frequency = scale
     max_value = 0.0
 
-    for _ in range(octaves):
+    for octave in range(octaves):
         # Simple hash-based value noise
         xi = (x * frequency).astype(np.int32)
         yi = (y * frequency).astype(np.int32)
 
-        # Hash function
-        h = (xi * 374761393 + yi * 668265263 + seed * 1274126177) & 0x7FFFFFFF
+        # Hash function using int64 for intermediate calculations to prevent overflow
+        xi_64 = xi.astype(np.int64)
+        yi_64 = yi.astype(np.int64)
+
+        h = (xi_64 * 374761393 + yi_64 * 668265263 + (seed + octave) * 1274126177)
+        h = h & 0x7FFFFFFF  # Keep in positive int32 range
         h = ((h ^ (h >> 13)) * 1274126177) & 0x7FFFFFFF
-        noise = (h & 0xFFFFFF) / 0xFFFFFF
+        noise = ((h & 0xFFFFFF).astype(np.float32)) / 0xFFFFFF
 
         total += noise * amplitude
         max_value += amplitude
