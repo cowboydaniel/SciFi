@@ -483,6 +483,10 @@ class HolographicTree:
         self.tip_branches: List[Branch] = []
         self.tip_indices: List[int] = []
         self.canopy_leaves: List[CanopyLeaf] = []
+        self.canopy_center_y = 0.0
+        self.canopy_half_height = 1.0
+        self.canopy_min_y = 0.0
+        self.canopy_max_y = 0.0
 
         self.root_x = width / 2
         self.root_y = 80
@@ -693,11 +697,11 @@ class HolographicTree:
             rng.uniform(0.0, max(0.0, 1.0 - uv_scale[1])),
         )
         color_variance = (
+            rng.uniform(-0.24, 0.28),
             rng.uniform(-0.18, 0.22),
-            rng.uniform(-0.12, 0.16),
-            rng.uniform(-0.2, 0.18),
+            rng.uniform(-0.26, 0.24),
         )
-        variance_amount = rng.uniform(0.25, 0.6)
+        variance_amount = rng.uniform(0.35, 0.85)
         return atlas_index, uv_offset, uv_scale, color_variance, variance_amount
 
     @staticmethod
@@ -802,9 +806,11 @@ class HolographicTree:
         - Clusters biased to outer shell
         - Drooping edges for realistic oak shape
         - Negative space (random gaps)
-        - 60-140 tiny leaf cards per cluster
+        - 40-110 tiny leaf cards per cluster
         """
         self.canopy_leaves = []
+        self.canopy_min_y = float("inf")
+        self.canopy_max_y = float("-inf")
 
         # No ellipsoid needed - spawn clusters DIRECTLY at branch tips!
         # This ensures leaves are ON branches, not floating in space
@@ -820,8 +826,8 @@ class HolographicTree:
         for tip_idx in self.tip_indices:
             branch = self.branches[tip_idx]
 
-            # Skip ~20% of tips randomly for negative space
-            if random.random() < 0.2:
+            # Skip ~8% of tips randomly for negative space
+            if random.random() < 0.08:
                 continue
 
             cluster_count += 1
@@ -850,9 +856,10 @@ class HolographicTree:
             # Cluster radius for spreading individual leaves
             cluster_radius = 12.0  # Slightly larger cluster to fill gaps
 
-            # Reduce leaves per cluster for performance (was 70-120)
-            # Target: 15-30 leaves per cluster
-            leaves_per_cluster = random.randint(15, 30)
+            # Increase leaves per cluster for fuller canopy
+            leaves_per_cluster = random.randint(40, 110)
+            if branch.depth >= 7:
+                leaves_per_cluster = int(leaves_per_cluster * 1.35)
             for card_idx in range(leaves_per_cluster):
                 atlas_index, uv_offset, uv_scale, color_variance, variance_amount = (
                     self._make_leaf_style(branch.variation_seed + cluster_count * 3.17 + card_idx * 1.23)
@@ -909,21 +916,69 @@ class HolographicTree:
                 axis_y = (up[0] * leaf_size, up[1] * leaf_size, up[2] * leaf_size)
                 axis_z = self._normalize(normal)
 
-                self.canopy_leaves.append(CanopyLeaf(
-                    branch_index=tip_idx,
-                    offset=(card_offset_x, card_offset_y, card_offset_z),
-                    axis_x=axis_x,
-                    axis_y=axis_y,
-                    axis_z=axis_z,
-                    base_color=jittered_color,
-                    atlas_index=atlas_index,
-                    uv_offset=uv_offset,
-                    uv_scale=uv_scale,
-                    color_variance=color_variance,
-                    variance_amount=variance_amount,
-                ))
+                leaf_y = branch.end_y + card_offset_y
+                self.canopy_min_y = min(self.canopy_min_y, leaf_y)
+                self.canopy_max_y = max(self.canopy_max_y, leaf_y)
+
+                def append_leaf(ax_x, ax_y, ax_z):
+                    self.canopy_leaves.append(CanopyLeaf(
+                        branch_index=tip_idx,
+                        offset=(card_offset_x, card_offset_y, card_offset_z),
+                        axis_x=ax_x,
+                        axis_y=ax_y,
+                        axis_z=ax_z,
+                        base_color=jittered_color,
+                        atlas_index=atlas_index,
+                        uv_offset=uv_offset,
+                        uv_scale=uv_scale,
+                        color_variance=color_variance,
+                        variance_amount=variance_amount,
+                    ))
+
+                append_leaf(axis_x, axis_y, axis_z)
+
+                # Cross card: same position/scale/UV, yaw rotated +90 degrees with slight tilt
+                yaw_cross = yaw + (math.pi * 0.5)
+                right_cross = (math.cos(yaw_cross), math.sin(yaw_cross), 0.0)
+                up_cross = (-math.sin(yaw_cross), math.cos(yaw_cross), 0.0)
+                normal_cross = (0.0, 0.0, 1.0)
+
+                up_cross = self._rotate_around_axis(up_cross, right_cross, pitch)
+                normal_cross = self._rotate_around_axis(normal_cross, right_cross, pitch)
+
+                forward_cross = self._normalize(self._cross(right_cross, up_cross))
+                up_cross = self._rotate_around_axis(up_cross, forward_cross, roll)
+                normal_cross = self._rotate_around_axis(normal_cross, forward_cross, roll)
+
+                tilt = random.uniform(-0.1745, 0.1745)
+                up_cross = self._rotate_around_axis(up_cross, right_cross, tilt)
+                normal_cross = self._rotate_around_axis(normal_cross, right_cross, tilt)
+
+                axis_x_cross = (
+                    right_cross[0] * leaf_size,
+                    right_cross[1] * leaf_size,
+                    right_cross[2] * leaf_size,
+                )
+                axis_y_cross = (
+                    up_cross[0] * leaf_size,
+                    up_cross[1] * leaf_size,
+                    up_cross[2] * leaf_size,
+                )
+                axis_z_cross = self._normalize(normal_cross)
+
+                append_leaf(axis_x_cross, axis_y_cross, axis_z_cross)
 
         # Debug output
+        if self.canopy_leaves:
+            self.canopy_min_y = min(self.canopy_min_y, self.canopy_max_y)
+            self.canopy_max_y = max(self.canopy_max_y, self.canopy_min_y)
+            self.canopy_center_y = (self.canopy_min_y + self.canopy_max_y) * 0.5
+            self.canopy_half_height = max((self.canopy_max_y - self.canopy_min_y) * 0.5, 1.0)
+        else:
+            self.canopy_min_y = self.root_y
+            self.canopy_max_y = self.root_y
+            self.canopy_center_y = self.root_y
+            self.canopy_half_height = 1.0
         print(f"Generated {len(self.canopy_leaves)} canopy leaves")
         print(f"Spawned {cluster_count} clusters on {len(self.tip_indices)} branch tips")
         print(f"Average {len(self.canopy_leaves) / cluster_count:.1f} leaves per cluster")
@@ -1555,6 +1610,10 @@ class OpenGLRenderer:
                 out vec3 v_normal;
                 out vec3 v_world_pos;
                 out vec4 v_light_space_pos;
+                out float v_canopy_factor;
+
+                uniform float u_canopy_center_y;
+                uniform float u_canopy_half_height;
 
                 void main() {
                     // Look up branch position from GPU buffer
@@ -1578,6 +1637,9 @@ class OpenGLRenderer:
                     v_normal = normalize(in_axis_z);
                     v_world_pos = world.xyz;
                     v_light_space_pos = u_light_space * world;
+                    float canopy_range = max(u_canopy_half_height, 0.001);
+                    float canopy_offset = (leaf_center.y - u_canopy_center_y) / canopy_range;
+                    v_canopy_factor = clamp(canopy_offset * 0.5 + 0.5, 0.0, 1.0);
                 }
             """,
             fragment_shader="""
@@ -1589,6 +1651,7 @@ class OpenGLRenderer:
                 in vec3 v_normal;
                 in vec3 v_world_pos;
                 in vec4 v_light_space_pos;
+                in float v_canopy_factor;
 
                 uniform sampler2D u_leaf_atlas;
                 uniform vec2 u_atlas_grid;
@@ -1683,10 +1746,13 @@ class OpenGLRenderer:
                     // Hemispheric ambient based on normal.y
                     float sky_factor = normal.y * 0.5 + 0.5;
                     vec3 ambient = mix(vec3(0.15, 0.12, 0.1), vec3(0.3, 0.35, 0.4), sky_factor);
+                    float hemi = mix(0.25, 1.0, clamp(sky_factor, 0.0, 1.0));
+                    ambient *= hemi;
 
                     // Combine lighting
                     vec3 direct = albedo * diff * shadow * u_light_color;
                     vec3 rgb = ambient * albedo + direct + translucent;
+                    rgb *= mix(0.78, 1.05, v_canopy_factor);
 
                     // Apply fog only if not in debug mode 3 (final no fog)
                     if (u_debug_view != 3) {
@@ -2378,6 +2444,8 @@ class OpenGLRenderer:
             self.leaf_program["u_camera_pos"].value = self.camera_position
             self.leaf_program["u_fog_color"].value = self.fog_color
             self.leaf_program["u_fog_density"].value = self.fog_density
+            self.leaf_program["u_canopy_center_y"].value = self.tree.canopy_center_y
+            self.leaf_program["u_canopy_half_height"].value = self.tree.canopy_half_height
             self.leaf_program["u_debug_view"].value = self.debug_view_mode
             self.leaf_vao.render(instances=self.leaf_count)
             if self.use_alpha_to_coverage:
