@@ -5,6 +5,7 @@ Uses hardware-accelerated blitting for 60+ FPS
 """
 
 import pygame
+import pygame.freetype  # Use freetype instead of font module (Python 3.14 compatible)
 import math
 import random
 import time
@@ -356,7 +357,7 @@ def main():
     clock = pygame.time.Clock()
     tree = HolographicTree(width, height)
 
-    font = pygame.font.SysFont("Courier", 16)
+    font = pygame.freetype.SysFont("Courier", 16)
 
     running = True
     frame_times = []
@@ -409,8 +410,7 @@ def main():
             f"FPS: {fps:.1f}"
         ]
         for i, text in enumerate(texts):
-            surf = font.render(text, True, ui_color)
-            screen.blit(surf, (30, 40 + i * 22))
+            font.render_to(screen, (30, 40 + i * 22), text, ui_color)
 
         # Bottom status
         bottom_texts = [
@@ -419,8 +419,7 @@ def main():
             "PHOTON FIELD: ACTIVE"
         ]
         for i, text in enumerate(bottom_texts):
-            surf = font.render(text, True, ui_color)
-            screen.blit(surf, (30, height - 90 + i * 22))
+            font.render_to(screen, (30, height - 90 + i * 22), text, ui_color)
 
         pygame.display.flip()
         clock.tick(165)  # Match your 165Hz monitor
