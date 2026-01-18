@@ -801,7 +801,8 @@ class OpenGLRenderer:
         self.ctx = moderngl.create_context()
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-        self.use_alpha_to_coverage = self.ctx.fbo.samples > 1
+        self.alpha_to_coverage_flag = getattr(moderngl, "SAMPLE_ALPHA_TO_COVERAGE", None)
+        self.use_alpha_to_coverage = self.ctx.fbo.samples > 1 and self.alpha_to_coverage_flag is not None
 
         self.camera_position = (tree.w * 0.5, tree.h * 0.6, 520.0)
         self.camera_target = (tree.w * 0.5, tree.h * 0.45, 0.0)
@@ -1258,9 +1259,10 @@ class OpenGLRenderer:
         leaf_instances = self.tree.build_leaf_instances()
         if leaf_instances:
             if self.use_alpha_to_coverage:
-                self.ctx.enable(moderngl.SAMPLE_ALPHA_TO_COVERAGE)
+                self.ctx.enable(self.alpha_to_coverage_flag)
             else:
-                self.ctx.disable(moderngl.SAMPLE_ALPHA_TO_COVERAGE)
+                if self.alpha_to_coverage_flag is not None:
+                    self.ctx.disable(self.alpha_to_coverage_flag)
                 cx, cy, cz = self.camera_position
                 leaf_instances.sort(
                     key=lambda inst: (inst.position[0] - cx) ** 2
@@ -1293,7 +1295,7 @@ class OpenGLRenderer:
             self.leaf_program["u_leaf_atlas"].value = 0
             self.leaf_vao.render(instances=len(leaf_data) // 25)
             if self.use_alpha_to_coverage:
-                self.ctx.disable(moderngl.SAMPLE_ALPHA_TO_COVERAGE)
+                self.ctx.disable(self.alpha_to_coverage_flag)
 
         bird_instances = self.tree.build_bird_instances()
         if bird_instances:
