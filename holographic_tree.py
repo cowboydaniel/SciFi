@@ -248,25 +248,25 @@ class HolographicTree:
             tb = random.choice(self.tip_branches)
             self.falling_leaves.append(FallingLeaf(
                 tb.end_x, tb.end_y, tb.z_depth,
-                random.uniform(-0.4, 0.4), random.uniform(0.5, 1.5),
+                random.uniform(-0.4, 0.4), random.uniform(-1.5, -0.5),
                 random.uniform(0, 360), random.uniform(-4, 4),
                 random.uniform(12, 20), random.uniform(0, 6.28),
                 random.uniform(2, 4), 1.0, 0
             ))
 
-        ground = self.h - 60
+        ground = 60
         new_l = []
         for lf in self.falling_leaves:
             lf.lifetime += 1
             lf.vx += self.wind.get_force(lf.y, self.h) * 0.003
             lf.vx *= 0.98
-            lf.vy = min(lf.vy + 0.03, 2.5)
+            lf.vy = max(lf.vy - 0.03, -2.5)
             lf.x += lf.vx + math.sin(lf.wobble_phase) * 1.5
             lf.wobble_phase += lf.wobble_speed * 0.016
             lf.y += lf.vy
             lf.rotation += lf.rotation_speed
 
-            if lf.y >= ground:
+            if lf.y <= ground:
                 lf.y = ground
                 lf.vy = 0
                 lf.rotation_speed *= 0.92
@@ -414,12 +414,16 @@ class OpenGLRenderer:
                 out vec4 f_color;
 
                 void main() {
-                    float dist = length(v_uv);
-                    if (dist > 1.0) {
+                    float t = clamp((v_uv.y + 1.0) * 0.5, 0.0, 1.0);
+                    float half_width = mix(0.9, 0.12, t);
+                    if (abs(v_uv.x) > half_width || v_uv.y < -1.0 || v_uv.y > 1.0) {
                         discard;
                     }
-                    float edge = smoothstep(1.0, 0.8, dist);
-                    float alpha = exp(-dist * 2.5) * edge;
+                    float x_norm = v_uv.x / max(half_width, 0.0001);
+                    float y_norm = (v_uv.y + 0.25) / 1.15;
+                    float dist = x_norm * x_norm + y_norm * y_norm;
+                    float edge = smoothstep(1.0, 0.72, dist);
+                    float alpha = exp(-dist * 2.2) * edge;
                     f_color = vec4(v_color.rgb, v_color.a * alpha);
                 }
             """,
