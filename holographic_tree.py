@@ -344,7 +344,7 @@ def main():
     pygame.init()
 
     # Import freetype after pygame.init() to avoid circular import on Python 3.14
-    import pygame.freetype
+    from pygame import freetype
 
     # Get primary display
     info = pygame.display.Info()
@@ -359,7 +359,7 @@ def main():
     clock = pygame.time.Clock()
     tree = HolographicTree(width, height)
 
-    font = pygame.freetype.SysFont("Courier", 16)
+    font = freetype.SysFont("Courier", 16)
 
     running = True
     frame_times = []
