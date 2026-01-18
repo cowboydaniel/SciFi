@@ -547,22 +547,13 @@ class HolographicTree:
             points = b.segment_points or [(b.start_x, b.start_y, b.start_z), (b.end_x, b.end_y, b.end_z)]
             if len(points) < 2:
                 continue
-            segment_lengths = []
-            total_length = 0.0
-            for i in range(len(points) - 1):
-                dx = points[i + 1][0] - points[i][0]
-                dy = points[i + 1][1] - points[i][1]
-                dz = points[i + 1][2] - points[i][2]
-                seg_len = math.sqrt(dx * dx + dy * dy + dz * dz)
-                segment_lengths.append(seg_len)
-                total_length += seg_len
-            if total_length <= 0.0001:
-                total_length = 1.0
-            u_cursor = 0.0
             for i in range(len(points) - 1):
                 x0, y0, z0 = points[i]
                 x1, y1, z1 = points[i + 1]
-                seg_len = segment_lengths[i]
+                dx = x1 - x0
+                dy = y1 - y0
+                dz = z1 - z0
+                seg_len = math.sqrt(dx * dx + dy * dy + dz * dz)
                 if seg_len <= 0.0001:
                     continue
                 direction = self._normalize((x1 - x0, y1 - y0, z1 - z0))
@@ -571,23 +562,20 @@ class HolographicTree:
                     up_ref = (0.0, 1.0, 0.0)
                 right = self._normalize(self._cross(up_ref, direction))
                 normal_axis = self._normalize(self._cross(direction, right))
-                half_thick = th * 0.5
+                mid = ((x0 + x1) * 0.5, (y0 + y1) * 0.5, (z0 + z1) * 0.5)
                 transform = self._build_transform(
-                    (x0, y0, z0),
-                    direction,
+                    mid,
                     right,
+                    direction,
                     normal_axis,
+                    th,
                     seg_len,
-                    half_thick,
-                    half_thick,
+                    th,
                 )
-                u_start = u_cursor
-                u_end = u_cursor + seg_len
-                u_cursor += seg_len
                 instances.extend([
                     *transform,
                     *color,
-                    u_start, u_end, *b.bark_tint, b.bark_roughness,
+                    *b.bark_tint, b.bark_roughness,
                 ])
         return instances
 
@@ -757,6 +745,40 @@ class OpenGLRenderer:
             0.0, 0.0, (2.0 * far * near) * nf, 0.0,
         )
 
+    @staticmethod
+    def _build_cylinder_mesh(segments: int = 18) -> List[float]:
+        data: List[float] = []
+        radius = 0.5
+        for i in range(segments):
+            angle0 = (i / segments) * math.tau
+            angle1 = ((i + 1) / segments) * math.tau
+            cos0, sin0 = math.cos(angle0), math.sin(angle0)
+            cos1, sin1 = math.cos(angle1), math.sin(angle1)
+            u0 = i / segments
+            u1 = (i + 1) / segments
+
+            def add_vertex(x: float, y: float, z: float, nx: float, nz: float, u: float, v: float):
+                data.extend([
+                    x, y, z,
+                    nx, 0.0, nz,
+                    u, v,
+                    -nz, 0.0, nx,
+                ])
+
+            y0 = -0.5
+            y1 = 0.5
+            x0, z0 = cos0 * radius, sin0 * radius
+            x1, z1 = cos1 * radius, sin1 * radius
+
+            add_vertex(x0, y0, z0, cos0, sin0, u0, 0.0)
+            add_vertex(x0, y1, z0, cos0, sin0, u0, 1.0)
+            add_vertex(x1, y1, z1, cos1, sin1, u1, 1.0)
+
+            add_vertex(x0, y0, z0, cos0, sin0, u0, 0.0)
+            add_vertex(x1, y1, z1, cos1, sin1, u1, 1.0)
+            add_vertex(x1, y0, z1, cos1, sin1, u1, 0.0)
+        return data
+
     def __init__(self, window: pyglet.window.Window, tree: HolographicTree):
         self.window = window
         self.tree = tree
@@ -771,19 +793,20 @@ class OpenGLRenderer:
         self.branch_program = self.ctx.program(
             vertex_shader="""
                 #version 330
-                in vec2 in_pos;
+                in vec3 in_pos;
+                in vec3 in_normal;
+                in vec2 in_uv;
+                in vec3 in_tangent;
                 in vec4 in_transform_0;
                 in vec4 in_transform_1;
                 in vec4 in_transform_2;
                 in vec4 in_transform_3;
                 in vec4 in_color;
-                in vec2 in_uv_range;
                 in vec3 in_bark_tint;
                 in float in_roughness;
 
                 uniform mat4 u_view;
                 uniform mat4 u_proj;
-                uniform float u_thickness_scale;
 
                 out vec2 v_local;
                 out vec4 v_color;
@@ -797,20 +820,18 @@ class OpenGLRenderer:
 
                 void main() {
                     mat4 transform = mat4(in_transform_0, in_transform_1, in_transform_2, in_transform_3);
-                    float along = (in_pos.x + 1.0) * 0.5;
-                    float lateral = in_pos.y * u_thickness_scale;
-                    vec3 local = vec3(along, lateral, 0.0);
-                    vec4 world = transform * vec4(local, 1.0);
+                    vec4 world = transform * vec4(in_pos, 1.0);
                     gl_Position = u_proj * u_view * world;
-                    v_local = vec2(along, lateral);
+                    v_local = vec2(in_uv.y, 0.0);
                     v_color = in_color;
-                    v_uv = vec2(mix(in_uv_range.x, in_uv_range.y, along), (in_pos.y * 0.5 + 0.5));
+                    v_uv = in_uv;
                     v_bark_tint = in_bark_tint;
                     v_roughness = in_roughness;
                     v_world_pos = world.xyz;
-                    v_tangent = normalize(in_transform_0.xyz);
-                    v_bitangent = normalize(in_transform_1.xyz);
-                    v_normal = normalize(in_transform_2.xyz);
+                    mat3 normal_mat = transpose(inverse(mat3(transform)));
+                    v_normal = normalize(normal_mat * in_normal);
+                    v_tangent = normalize(mat3(transform) * in_tangent);
+                    v_bitangent = normalize(cross(v_normal, v_tangent));
                 }
             """,
             fragment_shader="""
@@ -1137,6 +1158,8 @@ class OpenGLRenderer:
             1.0, 1.0,
             -1.0, 1.0,
         ]
+        cylinder = self._build_cylinder_mesh()
+        self.cylinder_vbo = self.ctx.buffer(data=array('f', cylinder))
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
         self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 96)
@@ -1147,10 +1170,10 @@ class OpenGLRenderer:
         self.branch_vao = self.ctx.vertex_array(
             self.branch_program,
             [
-                (self.quad_vbo, "2f", "in_pos"),
-                (self.branch_instance_vbo, "4f 4f 4f 4f 4f 2f 3f f /i",
+                (self.cylinder_vbo, "3f 3f 2f 3f", "in_pos", "in_normal", "in_uv", "in_tangent"),
+                (self.branch_instance_vbo, "4f 4f 4f 4f 4f 3f f /i",
                  "in_transform_0", "in_transform_1", "in_transform_2", "in_transform_3", "in_color",
-                 "in_uv_range", "in_bark_tint", "in_roughness"),
+                 "in_bark_tint", "in_roughness"),
             ],
         )
 
@@ -1212,9 +1235,8 @@ class OpenGLRenderer:
             self.branch_program["u_bark_normal"].value = 1
             self.branch_program["u_bark_roughness"].value = 2
 
-            self.branch_program["u_thickness_scale"].value = 1.0
             self.branch_program["u_glow"].value = 0.0
-            self.branch_vao.render(instances=len(branch_instances) // 26)
+            self.branch_vao.render(instances=len(branch_instances) // 24)
 
         leaf_instances = self.tree.build_leaf_instances()
         if leaf_instances:
