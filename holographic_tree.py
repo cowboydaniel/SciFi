@@ -67,15 +67,30 @@ class Branch:
 
 
 @dataclass
-class AttachedLeaf:
+class CanopyLeaf:
     branch_index: int
-    t: float
-    side: int
-    size: float
-    angle_offset: float
+    offset: tuple[float, float, float]
+    axis_x: tuple[float, float, float]
+    axis_y: tuple[float, float, float]
+    axis_z: tuple[float, float, float]
+    base_color: tuple[float, float, float, float]
     atlas_index: int
     uv_offset: tuple[float, float]
     uv_scale: tuple[float, float]
+    color_variance: tuple[float, float, float]
+    variance_amount: float
+
+
+@dataclass
+class LeafInstance:
+    position: tuple[float, float, float]
+    axis_x: tuple[float, float, float]
+    axis_y: tuple[float, float, float]
+    axis_z: tuple[float, float, float]
+    uv_offset: tuple[float, float]
+    uv_scale: tuple[float, float]
+    atlas_index: int
+    color: tuple[float, float, float, float]
     color_variance: tuple[float, float, float]
     variance_amount: float
 
@@ -142,7 +157,7 @@ class HolographicTree:
         self.sorted_branches: List[Branch] = []
         self.tip_branches: List[Branch] = []
         self.tip_indices: List[int] = []
-        self.attached_leaves: List[AttachedLeaf] = []
+        self.canopy_leaves: List[CanopyLeaf] = []
 
         self.root_x = width / 2
         self.root_y = 80
@@ -169,24 +184,8 @@ class HolographicTree:
         self.sorted_branches = sorted(self.branches, key=lambda b: b.z_depth)
         self.tip_indices = [i for i, branch in enumerate(self.branches) if branch.depth >= 6]
         self.tip_branches = [self.branches[i] for i in self.tip_indices]
-        self.attached_leaves = []
-        for idx in self.tip_indices:
-            for _ in range(random.randint(1, 3)):
-                atlas_index, uv_offset, uv_scale, color_variance, variance_amount = (
-                    self._make_leaf_style(idx + random.random())
-                )
-                self.attached_leaves.append(AttachedLeaf(
-                    branch_index=idx,
-                    t=random.uniform(0.82, 1.0),
-                    side=random.choice([-1, 1]),
-                    size=random.uniform(6, 12),
-                    angle_offset=random.uniform(-12, 12),
-                    atlas_index=atlas_index,
-                    uv_offset=uv_offset,
-                    uv_scale=uv_scale,
-                    color_variance=color_variance,
-                    variance_amount=variance_amount,
-                ))
+        self._update_branch_positions()
+        self._build_canopy_leaves()
         self._reset_bird()
 
     def _reset_bird(self):
@@ -379,6 +378,23 @@ class HolographicTree:
         return (v[0] / mag, v[1] / mag, v[2] / mag)
 
     @staticmethod
+    def _rotate_around_axis(
+        v: tuple[float, float, float],
+        axis: tuple[float, float, float],
+        angle: float,
+    ) -> tuple[float, float, float]:
+        ax = HolographicTree._normalize(axis)
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        dot = v[0] * ax[0] + v[1] * ax[1] + v[2] * ax[2]
+        cross = HolographicTree._cross(ax, v)
+        return (
+            v[0] * cos_a + cross[0] * sin_a + ax[0] * dot * (1 - cos_a),
+            v[1] * cos_a + cross[1] * sin_a + ax[1] * dot * (1 - cos_a),
+            v[2] * cos_a + cross[2] * sin_a + ax[2] * dot * (1 - cos_a),
+        )
+
+    @staticmethod
     def _build_transform(
         position: tuple[float, float, float],
         axis_x: tuple[float, float, float],
@@ -395,59 +411,7 @@ class HolographicTree:
             position[0], position[1], position[2], 1.0,
         ]
 
-    @staticmethod
-    def _get_branch_point_and_tangent(
-        points: List[tuple], t: float
-    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-        if len(points) < 2:
-            return (points[0] if points else (0.0, 0.0, 0.0)), (0.0, 1.0, 0.0)
-        t = max(0.0, min(1.0, t))
-        lengths = []
-        total = 0.0
-        for i in range(len(points) - 1):
-            dx = points[i + 1][0] - points[i][0]
-            dy = points[i + 1][1] - points[i][1]
-            dz = points[i + 1][2] - points[i][2]
-            seg_len = math.sqrt(dx * dx + dy * dy + dz * dz)
-            lengths.append(seg_len)
-            total += seg_len
-        if total <= 0:
-            p0, p1 = points[-2], points[-1]
-            dx = p1[0] - p0[0]
-            dy = p1[1] - p0[1]
-            dz = p1[2] - p0[2]
-            mag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
-            tangent = (dx / mag, dy / mag, dz / mag)
-            return p1, tangent
-        target = total * t
-        acc = 0.0
-        for i, seg_len in enumerate(lengths):
-            if acc + seg_len >= target:
-                local_t = (target - acc) / seg_len if seg_len else 0.0
-                x0, y0, z0 = points[i]
-                x1, y1, z1 = points[i + 1]
-                x = x0 + (x1 - x0) * local_t
-                y = y0 + (y1 - y0) * local_t
-                z = z0 + (z1 - z0) * local_t
-                dx = x1 - x0
-                dy = y1 - y0
-                dz = z1 - z0
-                mag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
-                tangent = (dx / mag, dy / mag, dz / mag)
-                return (x, y, z), tangent
-            acc += seg_len
-        p0, p1 = points[-2], points[-1]
-        dx = p1[0] - p0[0]
-        dy = p1[1] - p0[1]
-        dz = p1[2] - p0[2]
-        mag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
-        tangent = (dx / mag, dy / mag, dz / mag)
-        return p1, tangent
-
-    def update(self, dt: float):
-        self.time += dt
-        self.wind.update(dt)
-
+    def _update_branch_positions(self):
         for b in self.branches:
             if b.parent_index < 0:
                 b.start_x, b.start_y, b.start_z = self.root_x, self.root_y, 0.0
@@ -488,6 +452,73 @@ class HolographicTree:
                 b.current_angle = current_angle
             b.segment_points = points
             b.end_x, b.end_y, b.end_z = points[-1]
+
+    def _build_canopy_leaves(self):
+        self.canopy_leaves = []
+        for idx in self.tip_indices:
+            branch = self.branches[idx]
+            zf = (branch.z_depth + 1) / 2
+            base_color = (0.6 + zf * 0.4, 0.95, 1.0, 0.55)
+            cluster_radius = (
+                random.uniform(16, 26),
+                random.uniform(12, 22),
+                random.uniform(12, 24),
+            )
+            count = random.randint(20, 60)
+            for i in range(count):
+                atlas_index, uv_offset, uv_scale, color_variance, variance_amount = (
+                    self._make_leaf_style(branch.variation_seed + i * 0.31)
+                )
+                theta = random.uniform(0.0, math.tau)
+                phi = math.acos(random.uniform(-1.0, 1.0))
+                radius = random.random() ** (1.0 / 3.0)
+                dir_x = math.sin(phi) * math.cos(theta)
+                dir_y = math.sin(phi) * math.sin(theta)
+                dir_z = math.cos(phi)
+                offset = (
+                    dir_x * cluster_radius[0] * radius,
+                    dir_y * cluster_radius[1] * radius,
+                    dir_z * cluster_radius[2] * radius,
+                )
+                jitter = (
+                    random.uniform(-2.0, 2.0),
+                    random.uniform(-2.0, 2.0),
+                    random.uniform(-1.5, 1.5),
+                )
+                offset = (
+                    offset[0] + jitter[0],
+                    offset[1] + jitter[1],
+                    offset[2] + jitter[2],
+                )
+                yaw = random.uniform(0.0, math.tau)
+                right = (math.cos(yaw), math.sin(yaw), 0.0)
+                up = (-math.sin(yaw), math.cos(yaw), 0.0)
+                normal = (0.0, 0.0, 1.0)
+                droop = math.radians(random.uniform(8.0, 22.0))
+                up = self._rotate_around_axis(up, right, droop)
+                normal = self._rotate_around_axis(normal, right, droop)
+                size = random.uniform(8, 16) * (0.85 + zf * 0.25)
+                axis_x = (right[0] * size, right[1] * size, right[2] * size)
+                axis_y = (up[0] * size, up[1] * size, up[2] * size)
+                axis_z = self._normalize(normal)
+                self.canopy_leaves.append(CanopyLeaf(
+                    branch_index=idx,
+                    offset=offset,
+                    axis_x=axis_x,
+                    axis_y=axis_y,
+                    axis_z=axis_z,
+                    base_color=base_color,
+                    atlas_index=atlas_index,
+                    uv_offset=uv_offset,
+                    uv_scale=uv_scale,
+                    color_variance=color_variance,
+                    variance_amount=variance_amount,
+                ))
+
+    def update(self, dt: float):
+        self.time += dt
+        self.wind.update(dt)
+        self._update_branch_positions()
 
         base_flicker = 0.93 + 0.06 * math.sin(self.time * 1.1) + 0.01 * math.sin(self.time * 0.35)
         if random.random() > 0.994:
@@ -579,47 +610,36 @@ class HolographicTree:
                 ])
         return instances
 
-    def build_leaf_instances(self) -> List[float]:
-        instances: List[float] = []
+    def build_leaf_instances(self) -> List[LeafInstance]:
+        instances: List[LeafInstance] = []
         f = self.flicker
-        for leaf in self.attached_leaves:
+        for leaf in self.canopy_leaves:
             if leaf.branch_index >= len(self.branches):
                 continue
             branch = self.branches[leaf.branch_index]
-            points = branch.segment_points or [
-                (branch.start_x, branch.start_y, branch.start_z),
-                (branch.end_x, branch.end_y, branch.end_z),
-            ]
-            if not points:
-                continue
-            (attach_x, attach_y, attach_z), tangent = self._get_branch_point_and_tangent(points, leaf.t)
-            tangent_angle = math.degrees(math.atan2(tangent[1], tangent[0]))
-            angle = tangent_angle + 180 + leaf.angle_offset + leaf.side * 6
-            size = leaf.size * (0.7 + (branch.z_depth + 1) * 0.15)
-            zf = (branch.z_depth + 1) / 2
-            color = (0.6 + zf * 0.4, 0.95, 1.0, 0.6 * f)
-            rot = math.radians(angle)
-            right = (math.cos(rot), math.sin(rot), 0.0)
-            up = (-math.sin(rot), math.cos(rot), 0.0)
-            normal = (0.0, 0.0, 1.0)
-            transform = self._build_transform(
-                (attach_x, attach_y, attach_z),
-                right,
-                up,
-                normal,
-                size,
-                size,
-                size,
+            position = (
+                branch.end_x + leaf.offset[0],
+                branch.end_y + leaf.offset[1],
+                branch.end_z + leaf.offset[2],
             )
-            instances.extend([
-                *transform,
-                *leaf.uv_offset,
-                *leaf.uv_scale,
-                float(leaf.atlas_index),
-                *color,
-                *leaf.color_variance,
-                leaf.variance_amount,
-            ])
+            color = (
+                leaf.base_color[0],
+                leaf.base_color[1],
+                leaf.base_color[2],
+                leaf.base_color[3] * f,
+            )
+            instances.append(LeafInstance(
+                position=position,
+                axis_x=leaf.axis_x,
+                axis_y=leaf.axis_y,
+                axis_z=leaf.axis_z,
+                uv_offset=leaf.uv_offset,
+                uv_scale=leaf.uv_scale,
+                atlas_index=leaf.atlas_index,
+                color=color,
+                color_variance=leaf.color_variance,
+                variance_amount=leaf.variance_amount,
+            ))
 
         for lf in self.falling_leaves:
             size = lf.size * (0.8 + (lf.z + 1) * 0.2)
@@ -627,25 +647,21 @@ class HolographicTree:
             rot = math.radians(lf.rotation)
             right = (math.cos(rot), math.sin(rot), 0.0)
             up = (-math.sin(rot), math.cos(rot), 0.0)
-            normal = (0.0, 0.0, 1.0)
-            transform = self._build_transform(
-                (lf.x, lf.y, lf.z),
-                right,
-                up,
-                normal,
-                size,
-                size,
-                size,
-            )
-            instances.extend([
-                *transform,
-                *lf.uv_offset,
-                *lf.uv_scale,
-                float(lf.atlas_index),
-                *color,
-                *lf.color_variance,
-                lf.variance_amount,
-            ])
+            axis_x = (right[0] * size, right[1] * size, right[2] * size)
+            axis_y = (up[0] * size, up[1] * size, up[2] * size)
+            axis_z = (0.0, 0.0, 1.0)
+            instances.append(LeafInstance(
+                position=(lf.x, lf.y, lf.z),
+                axis_x=axis_x,
+                axis_y=axis_y,
+                axis_z=axis_z,
+                uv_offset=lf.uv_offset,
+                uv_scale=lf.uv_scale,
+                atlas_index=lf.atlas_index,
+                color=color,
+                color_variance=lf.color_variance,
+                variance_amount=lf.variance_amount,
+            ))
 
         return instances
 
@@ -785,6 +801,7 @@ class OpenGLRenderer:
         self.ctx = moderngl.create_context()
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        self.use_alpha_to_coverage = self.ctx.fbo.samples > 1
 
         self.camera_position = (tree.w * 0.5, tree.h * 0.6, 520.0)
         self.camera_target = (tree.w * 0.5, tree.h * 0.45, 0.0)
@@ -948,10 +965,10 @@ class OpenGLRenderer:
             vertex_shader="""
                 #version 330
                 in vec2 in_pos;
-                in vec4 in_transform_0;
-                in vec4 in_transform_1;
-                in vec4 in_transform_2;
-                in vec4 in_transform_3;
+                in vec3 in_center;
+                in vec3 in_axis_x;
+                in vec3 in_axis_y;
+                in vec3 in_axis_z;
                 in vec2 in_uv_offset;
                 in vec2 in_uv_scale;
                 in float in_atlas_index;
@@ -968,15 +985,15 @@ class OpenGLRenderer:
                 out vec3 v_normal;
 
                 void main() {
-                    mat4 transform = mat4(in_transform_0, in_transform_1, in_transform_2, in_transform_3);
-                    vec4 world = transform * vec4(in_pos.xy, 0.0, 1.0);
+                    vec3 offset = in_axis_x * in_pos.x + in_axis_y * in_pos.y;
+                    vec4 world = vec4(in_center + offset, 1.0);
                     gl_Position = u_proj * u_view * world;
                     vec2 base_uv = in_pos * 0.5 + 0.5;
                     v_uv = in_uv_offset + base_uv * in_uv_scale;
                     v_atlas_index = in_atlas_index;
                     v_color = in_color;
                     v_variance = in_variance;
-                    v_normal = normalize(in_transform_2.xyz);
+                    v_normal = normalize(in_axis_z);
                 }
             """,
             fragment_shader="""
@@ -1163,7 +1180,7 @@ class OpenGLRenderer:
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
         self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 96)
-        self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 72)
+        self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 128)
         self.bird_instance_vbo = self.ctx.buffer(reserve=4 * 64)
         self.ui_line_instance_vbo = self.ctx.buffer(reserve=4 * 64)
 
@@ -1181,8 +1198,8 @@ class OpenGLRenderer:
             self.leaf_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.leaf_instance_vbo, "4f 4f 4f 4f 2f 2f f 4f 4f /i",
-                 "in_transform_0", "in_transform_1", "in_transform_2", "in_transform_3",
+                (self.leaf_instance_vbo, "3f 3f 3f 3f 2f 2f f 4f 4f /i",
+                 "in_center", "in_axis_x", "in_axis_y", "in_axis_z",
                  "in_uv_offset", "in_uv_scale",
                  "in_atlas_index", "in_color", "in_variance"),
             ],
@@ -1240,7 +1257,32 @@ class OpenGLRenderer:
 
         leaf_instances = self.tree.build_leaf_instances()
         if leaf_instances:
-            data = array('f', leaf_instances)
+            if self.use_alpha_to_coverage:
+                self.ctx.enable(moderngl.SAMPLE_ALPHA_TO_COVERAGE)
+            else:
+                self.ctx.disable(moderngl.SAMPLE_ALPHA_TO_COVERAGE)
+                cx, cy, cz = self.camera_position
+                leaf_instances.sort(
+                    key=lambda inst: (inst.position[0] - cx) ** 2
+                    + (inst.position[1] - cy) ** 2
+                    + (inst.position[2] - cz) ** 2,
+                    reverse=True,
+                )
+            leaf_data: List[float] = []
+            for leaf in leaf_instances:
+                leaf_data.extend([
+                    *leaf.position,
+                    *leaf.axis_x,
+                    *leaf.axis_y,
+                    *leaf.axis_z,
+                    *leaf.uv_offset,
+                    *leaf.uv_scale,
+                    float(leaf.atlas_index),
+                    *leaf.color,
+                    *leaf.color_variance,
+                    leaf.variance_amount,
+                ])
+            data = array('f', leaf_data)
             self.leaf_instance_vbo.orphan(len(data) * 4)
             self.leaf_instance_vbo.write(data)
             self.leaf_program["u_view"].write(view)
@@ -1249,7 +1291,9 @@ class OpenGLRenderer:
             self.leaf_program["u_alpha_cutoff"].value = 0.2
             self.leaf_atlas.use(location=0)
             self.leaf_program["u_leaf_atlas"].value = 0
-            self.leaf_vao.render(instances=len(leaf_instances) // 29)
+            self.leaf_vao.render(instances=len(leaf_data) // 25)
+            if self.use_alpha_to_coverage:
+                self.ctx.disable(moderngl.SAMPLE_ALPHA_TO_COVERAGE)
 
         bird_instances = self.tree.build_bird_instances()
         if bird_instances:
