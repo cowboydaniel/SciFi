@@ -134,6 +134,8 @@ class HolographicTree:
         self.leaf_rotation_cache: dict[tuple[int, int], tuple] = {}
         self.leaf_atlas_cols = 4
         self.leaf_atlas_rows = 4
+        self.bird_sprite_cols = 4
+        self.bird_sprite_rows = 1
 
         self.sorted_branches: List[Branch] = []
         self.tip_branches: List[Branch] = []
@@ -572,8 +574,15 @@ class HolographicTree:
         color = (0.43, 0.92, 1.0, 0.95 * self.flicker)
         wing_color = (0.27, 0.78, 1.0, 0.85 * self.flicker)
         beak_color = (1.0, 0.82, 0.35, 0.9 * self.flicker)
+        frame_count = max(1, self.bird_sprite_cols * self.bird_sprite_rows)
+        if bird.wing_speed > 0:
+            phase = (bird.wing_phase / (2 * math.pi)) % 1.0
+            frame_index = int(phase * frame_count) % frame_count
+        else:
+            frame_index = 0
         return [
             bird.x, bird.y, size, float(bird.facing), flap,
+            0.0, 0.0, 1.0, 1.0, float(frame_index),
             *color, *wing_color, *beak_color,
         ]
 
@@ -711,6 +720,9 @@ class OpenGLRenderer:
         self.leaf_atlas = self._load_texture("assets/leaf_atlas.png", fallback_color=(255, 255, 255, 255))
         self.leaf_atlas.repeat_x = False
         self.leaf_atlas.repeat_y = False
+        self.bird_sprite = self._load_texture("assets/bird_sprite.png", fallback_color=(255, 255, 255, 0))
+        self.bird_sprite.repeat_x = False
+        self.bird_sprite.repeat_y = False
 
         self.leaf_program = self.ctx.program(
             vertex_shader="""
@@ -788,15 +800,19 @@ class OpenGLRenderer:
                 in float in_size;
                 in float in_facing;
                 in float in_flap;
+                in vec2 in_uv_offset;
+                in vec2 in_uv_scale;
+                in float in_frame;
                 in vec4 in_body_color;
                 in vec4 in_wing_color;
                 in vec4 in_beak_color;
 
                 uniform vec2 u_resolution;
 
-                out vec2 v_pos;
+                out vec2 v_uv;
                 out float v_facing;
                 out float v_flap;
+                out float v_frame;
                 out vec4 v_body_color;
                 out vec4 v_wing_color;
                 out vec4 v_beak_color;
@@ -807,9 +823,14 @@ class OpenGLRenderer:
                     vec2 ndc = vec2((world.x / u_resolution.x) * 2.0 - 1.0,
                                     (world.y / u_resolution.y) * 2.0 - 1.0);
                     gl_Position = vec4(ndc, 0.0, 1.0);
-                    v_pos = in_pos;
                     v_facing = in_facing;
                     v_flap = in_flap;
+                    vec2 base_uv = in_pos * 0.5 + 0.5;
+                    if (in_facing < 0.0) {
+                        base_uv.x = 1.0 - base_uv.x;
+                    }
+                    v_uv = in_uv_offset + base_uv * in_uv_scale;
+                    v_frame = in_frame;
                     v_body_color = in_body_color;
                     v_wing_color = in_wing_color;
                     v_beak_color = in_beak_color;
@@ -817,70 +838,38 @@ class OpenGLRenderer:
             """,
             fragment_shader="""
                 #version 330
-                in vec2 v_pos;
+                in vec2 v_uv;
                 in float v_facing;
                 in float v_flap;
+                in float v_frame;
                 in vec4 v_body_color;
                 in vec4 v_wing_color;
                 in vec4 v_beak_color;
 
+                uniform sampler2D u_bird_sprite;
+                uniform vec2 u_sprite_grid;
+                uniform float u_alpha_cutoff;
+
                 out vec4 f_color;
 
-                float ellipse(vec2 p, vec2 center, vec2 radius) {
-                    vec2 d = (p - center) / radius;
-                    float dist = dot(d, d);
-                    return smoothstep(1.08, 1.0, dist);
-                }
-
-                float triangle(vec2 p, vec2 a, vec2 b, vec2 c) {
-                    vec2 v0 = b - a;
-                    vec2 v1 = c - a;
-                    vec2 v2 = p - a;
-                    float denom = v0.x * v1.y - v1.x * v0.y;
-                    if (abs(denom) < 0.0001) {
-                        return 0.0;
-                    }
-                    float u = (v2.x * v1.y - v1.x * v2.y) / denom;
-                    float v = (v0.x * v2.y - v2.x * v0.y) / denom;
-                    float inside = step(0.0, u) * step(0.0, v) * step(u + v, 1.0);
-                    return inside;
-                }
-
                 void main() {
-                    vec2 p = v_pos;
-                    float facing = v_facing;
-                    float body = ellipse(p, vec2(0.05 * facing, 0.0), vec2(0.6, 0.26));
-                    float head = ellipse(p, vec2(0.72 * facing, -0.07), vec2(0.17, 0.17));
-                    float wing_primary = ellipse(
-                        p,
-                        vec2(-0.12 * facing, 0.1 + v_flap * 0.14),
-                        vec2(0.48, 0.22)
-                    );
-                    float wing_secondary = ellipse(
-                        p,
-                        vec2(-0.38 * facing, 0.02 + v_flap * 0.08),
-                        vec2(0.28, 0.16)
-                    );
-                    vec2 tail_a = vec2(-0.7 * facing, 0.0);
-                    vec2 tail_b = vec2(-0.98 * facing, 0.12);
-                    vec2 tail_c = vec2(-0.98 * facing, -0.12);
-                    float tail = triangle(p, tail_a, tail_b, tail_c);
-                    vec2 beak_a = vec2(0.82 * facing, -0.02);
-                    vec2 beak_b = vec2(1.02 * facing, -0.08);
-                    vec2 beak_c = vec2(1.02 * facing, 0.04);
-                    float beak = triangle(p, beak_a, beak_b, beak_c);
-
-                    float wing = max(wing_primary, wing_secondary);
-                    float alpha = max(max(body, head), max(wing * 0.9, tail));
-                    if (alpha < 0.01 && beak < 0.01) {
+                    vec2 grid = max(u_sprite_grid, vec2(1.0));
+                    float index = max(v_frame, 0.0);
+                    vec2 cell = vec2(mod(index, grid.x), floor(index / grid.x));
+                    vec2 atlas_uv = (cell + clamp(v_uv, 0.0, 1.0)) / grid;
+                    vec4 tex = texture(u_bird_sprite, atlas_uv);
+                    float alpha = tex.a * v_body_color.a;
+                    if (alpha < u_alpha_cutoff) {
                         discard;
                     }
-
-                    vec4 color = v_body_color;
-                    color = mix(color, v_wing_color, clamp(wing, 0.0, 1.0) * 0.9);
-                    color = mix(color, v_beak_color, beak);
-                    color.a *= max(alpha, beak);
-                    f_color = color;
+                    vec3 normal = normalize(vec3((v_uv - 0.5) * vec2(0.6, 0.4), 1.0));
+                    vec3 light_dir = normalize(vec3(0.35, 0.4, 0.85));
+                    float diff = max(dot(normal, light_dir), 0.0);
+                    vec3 tint = mix(v_body_color.rgb, v_wing_color.rgb, 0.2);
+                    tint = mix(tint, v_beak_color.rgb, 0.08);
+                    vec3 lit = tex.rgb * tint * (0.75 + diff * 0.25);
+                    lit *= alpha;
+                    f_color = vec4(lit, alpha);
                 }
             """,
         )
@@ -972,8 +961,9 @@ class OpenGLRenderer:
             self.bird_program,
             [
                 (self.quad_vbo, "2f", "in_pos"),
-                (self.bird_instance_vbo, "2f f f f 4f 4f 4f /i",
+                (self.bird_instance_vbo, "2f f f f 2f 2f f 4f 4f 4f /i",
                  "in_center", "in_size", "in_facing", "in_flap",
+                 "in_uv_offset", "in_uv_scale", "in_frame",
                  "in_body_color", "in_wing_color", "in_beak_color"),
             ],
         )
@@ -1031,6 +1021,13 @@ class OpenGLRenderer:
             self.bird_instance_vbo.orphan(len(data) * 4)
             self.bird_instance_vbo.write(data)
             self.bird_program["u_resolution"].value = (width, height)
+            self.bird_program["u_sprite_grid"].value = (
+                self.tree.bird_sprite_cols,
+                self.tree.bird_sprite_rows,
+            )
+            self.bird_program["u_alpha_cutoff"].value = 0.2
+            self.bird_sprite.use(location=0)
+            self.bird_program["u_bird_sprite"].value = 0
             self.bird_vao.render(instances=1)
 
         flicker = self.tree.flicker
