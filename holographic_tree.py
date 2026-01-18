@@ -52,12 +52,15 @@ class Branch:
     current_angle: float = 0.0
     start_x: float = 0.0
     start_y: float = 0.0
+    start_z: float = 0.0
     end_x: float = 0.0
     end_y: float = 0.0
+    end_z: float = 0.0
     segment_fracs: List[float] = field(default_factory=list)
     segment_jitter: List[float] = field(default_factory=list)
     segment_sway: List[float] = field(default_factory=list)
     segment_points: List[tuple] = field(default_factory=list)
+    wind_dir: tuple[float, float] = (0.0, 0.0)
     variation_seed: float = 0.0
     bark_tint: tuple[float, float, float] = (1.0, 1.0, 1.0)
     bark_roughness: float = 0.6
@@ -312,6 +315,8 @@ class HolographicTree:
             rng.uniform(0.65, 0.95),
         )
         b.bark_roughness = rng.uniform(0.35, 0.75)
+        wind_angle = rng.uniform(0.0, math.tau)
+        b.wind_dir = (math.cos(wind_angle), math.sin(wind_angle))
         point_count = random.randint(3, 6)
         segment_count = max(2, point_count - 1)
         weights = [random.uniform(0.6, 1.4) for _ in range(segment_count)]
@@ -355,35 +360,53 @@ class HolographicTree:
         return atlas_index, uv_offset, uv_scale, color_variance, variance_amount
 
     @staticmethod
-    def _get_branch_point_and_angle(points: List[tuple], t: float) -> tuple[tuple[float, float], float]:
+    def _get_branch_point_and_tangent(
+        points: List[tuple], t: float
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
         if len(points) < 2:
-            return (points[0] if points else (0.0, 0.0)), -90.0
+            return (points[0] if points else (0.0, 0.0, 0.0)), (0.0, 1.0, 0.0)
         t = max(0.0, min(1.0, t))
         lengths = []
         total = 0.0
         for i in range(len(points) - 1):
-            seg_len = math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+            dx = points[i + 1][0] - points[i][0]
+            dy = points[i + 1][1] - points[i][1]
+            dz = points[i + 1][2] - points[i][2]
+            seg_len = math.sqrt(dx * dx + dy * dy + dz * dz)
             lengths.append(seg_len)
             total += seg_len
         if total <= 0:
             p0, p1 = points[-2], points[-1]
-            angle = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
-            return p1, angle
+            dx = p1[0] - p0[0]
+            dy = p1[1] - p0[1]
+            dz = p1[2] - p0[2]
+            mag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+            tangent = (dx / mag, dy / mag, dz / mag)
+            return p1, tangent
         target = total * t
         acc = 0.0
         for i, seg_len in enumerate(lengths):
             if acc + seg_len >= target:
                 local_t = (target - acc) / seg_len if seg_len else 0.0
-                x0, y0 = points[i]
-                x1, y1 = points[i + 1]
+                x0, y0, z0 = points[i]
+                x1, y1, z1 = points[i + 1]
                 x = x0 + (x1 - x0) * local_t
                 y = y0 + (y1 - y0) * local_t
-                angle = math.degrees(math.atan2(y1 - y0, x1 - x0))
-                return (x, y), angle
+                z = z0 + (z1 - z0) * local_t
+                dx = x1 - x0
+                dy = y1 - y0
+                dz = z1 - z0
+                mag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+                tangent = (dx / mag, dy / mag, dz / mag)
+                return (x, y, z), tangent
             acc += seg_len
         p0, p1 = points[-2], points[-1]
-        angle = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
-        return p1, angle
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+        dz = p1[2] - p0[2]
+        mag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+        tangent = (dx / mag, dy / mag, dz / mag)
+        return p1, tangent
 
     def update(self, dt: float):
         self.time += dt
@@ -391,10 +414,10 @@ class HolographicTree:
 
         for b in self.branches:
             if b.parent_index < 0:
-                b.start_x, b.start_y = self.root_x, self.root_y
+                b.start_x, b.start_y, b.start_z = self.root_x, self.root_y, 0.0
             else:
                 p = self.branches[b.parent_index]
-                b.start_x, b.start_y = p.end_x, p.end_y
+                b.start_x, b.start_y, b.start_z = p.end_x, p.end_y, p.end_z
 
             flex = 1.0 - b.stiffness
             wave = math.sin(self.time * 2.5 - b.phase_offset) * 0.3
@@ -402,8 +425,8 @@ class HolographicTree:
             length = b.length * scale
             base_angle = b.base_angle + math.sin(self.time * 1.8 + b.phase_offset * 2) * 2 * flex
 
-            points = [(b.start_x, b.start_y)]
-            x, y = b.start_x, b.start_y
+            points = [(b.start_x, b.start_y, b.start_z)]
+            x, y, z = b.start_x, b.start_y, b.start_z
             current_angle = base_angle
             segment_fracs = b.segment_fracs or [1.0]
             segment_jitter = b.segment_jitter or [0.0] * len(segment_fracs)
@@ -415,13 +438,20 @@ class HolographicTree:
                 wobble = math.sin(self.time * 2.5 - b.phase_offset + i * 0.5) * 1.2
                 current_angle = base_angle + segment_jitter[i] + sway + wobble
                 rad = math.radians(current_angle)
-                x += seg_len * math.cos(rad)
+                wind_dx, wind_dz = b.wind_dir
+                lateral = math.sin(math.radians(sway)) * seg_len * 0.6
+                x += seg_len * math.cos(rad) + lateral * wind_dx
                 y += seg_len * math.sin(rad)
-                points.append((x, y))
+                z += lateral * wind_dz
+                points.append((x, y, z))
 
-            b.current_angle = current_angle
+            if len(points) >= 2:
+                p0, p1 = points[-2], points[-1]
+                b.current_angle = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
+            else:
+                b.current_angle = current_angle
             b.segment_points = points
-            b.end_x, b.end_y = points[-1]
+            b.end_x, b.end_y, b.end_z = points[-1]
 
         base_flicker = 0.93 + 0.06 * math.sin(self.time * 1.1) + 0.01 * math.sin(self.time * 0.35)
         if random.random() > 0.994:
@@ -435,7 +465,7 @@ class HolographicTree:
                 tb.variation_seed + self.time + random.random()
             )
             self.falling_leaves.append(FallingLeaf(
-                tb.end_x, tb.end_y, tb.z_depth,
+                tb.end_x, tb.end_y, tb.end_z,
                 random.uniform(-0.4, 0.4), random.uniform(-1.5, -0.5),
                 random.uniform(0, 360), random.uniform(-4, 4),
                 random.uniform(12, 20), random.uniform(0, 6.28),
@@ -478,21 +508,24 @@ class HolographicTree:
             blue = 255 * pulse / 255.0
             color = (r, g, blue, 0.7)
             th = max(1, b.thickness * (0.85 + zf * 0.3))
-            points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
+            points = b.segment_points or [(b.start_x, b.start_y, b.start_z), (b.end_x, b.end_y, b.end_z)]
             if len(points) < 2:
                 continue
             segment_lengths = []
             total_length = 0.0
             for i in range(len(points) - 1):
-                seg_len = math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+                dx = points[i + 1][0] - points[i][0]
+                dy = points[i + 1][1] - points[i][1]
+                dz = points[i + 1][2] - points[i][2]
+                seg_len = math.sqrt(dx * dx + dy * dy + dz * dz)
                 segment_lengths.append(seg_len)
                 total_length += seg_len
             if total_length <= 0.0001:
                 total_length = 1.0
             u_cursor = 0.0
             for i in range(len(points) - 1):
-                x0, y0 = points[i]
-                x1, y1 = points[i + 1]
+                x0, y0, _ = points[i]
+                x1, y1, _ = points[i + 1]
                 seg_len = segment_lengths[i]
                 u_start = u_cursor
                 u_end = u_cursor + seg_len
@@ -510,10 +543,14 @@ class HolographicTree:
             if leaf.branch_index >= len(self.branches):
                 continue
             branch = self.branches[leaf.branch_index]
-            points = branch.segment_points or [(branch.start_x, branch.start_y), (branch.end_x, branch.end_y)]
+            points = branch.segment_points or [
+                (branch.start_x, branch.start_y, branch.start_z),
+                (branch.end_x, branch.end_y, branch.end_z),
+            ]
             if not points:
                 continue
-            (attach_x, attach_y), tangent_angle = self._get_branch_point_and_angle(points, leaf.t)
+            (attach_x, attach_y, _), tangent = self._get_branch_point_and_tangent(points, leaf.t)
+            tangent_angle = math.degrees(math.atan2(tangent[1], tangent[0]))
             angle = tangent_angle + 180 + leaf.angle_offset + leaf.side * 6
             size = leaf.size * (0.7 + (branch.z_depth + 1) * 0.15)
             zf = (branch.z_depth + 1) / 2
