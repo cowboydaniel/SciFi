@@ -104,7 +104,7 @@ class HolographicTree:
 
         # Pre-create glow surfaces for particles (GPU cached)
         self.glow_surfaces = {}
-        for size in range(2, 20):
+        for size in range(1, 8):
             surf = pygame.Surface((size * 6, size * 6), pygame.SRCALPHA)
             for r in range(size * 3, 0, -1):
                 alpha = int(60 * (1 - r / (size * 3)))
@@ -172,7 +172,7 @@ class HolographicTree:
             self.particles.append(Particle(
                 tb.end_x + random.uniform(-10, 10), tb.end_y + random.uniform(-10, 10),
                 tb.z_depth, random.uniform(-0.6, 0.6), random.uniform(-2.5, -0.8),
-                random.uniform(3, 6), random.uniform(0.6, 1.0), 0, random.uniform(80, 150)
+                random.uniform(1.5, 3.0), random.uniform(0.6, 1.0), 0, random.uniform(80, 150)
             ))
 
         # Spawn leaves
@@ -230,12 +230,12 @@ class HolographicTree:
         cx, hy = self.w // 2, int(self.h * 0.35)
         grid_color = (0, 50, 70)
         for i in range(-8, 9, 2):
-            pygame.draw.line(screen, grid_color, (cx + i * 100, self.h), (cx, hy), 1)
+            pygame.draw.aaline(screen, grid_color, (cx + i * 100, self.h), (cx, hy))
         for i in range(8):
             ratio = i / 8
             y = self.h - int((self.h - hy) * (ratio ** 1.3))
             sp = int((1 - ratio ** 1.3) * self.w * 0.6)
-            pygame.draw.line(screen, grid_color, (cx - sp, y), (cx + sp, y), 1)
+            pygame.draw.aaline(screen, grid_color, (cx - sp, y), (cx + sp, y))
 
         # Platform
         py = self.h - 40
@@ -252,10 +252,9 @@ class HolographicTree:
             color = (0, int(150 * f), int(200 * f), ga)
             # Thick glow line
             for offset in range(-2, 3):
-                pygame.draw.line(screen, (0, int(80 * f), int(120 * f)),
-                               (b.start_x + offset, b.start_y),
-                               (b.end_x + offset, b.end_y),
-                               max(1, int(b.thickness + 6)))
+                pygame.draw.aaline(screen, (0, int(80 * f), int(120 * f)),
+                                  (b.start_x + offset, b.start_y),
+                                  (b.end_x + offset, b.end_y))
 
         # Tree branches
         for b in self.sorted_branches:
@@ -266,17 +265,26 @@ class HolographicTree:
             blue = int(255 * pulse)
             th = max(1, int(b.thickness * (0.85 + zf * 0.3)))
 
-            pygame.draw.line(screen, (r, g, blue),
-                           (int(b.start_x), int(b.start_y)),
-                           (int(b.end_x), int(b.end_y)), th)
+            # Draw multiple antialiased lines for thickness
+            for offset in range(-th//2, th//2 + 1):
+                pygame.draw.aaline(screen, (r, g, blue),
+                                  (int(b.start_x) + offset, int(b.start_y)),
+                                  (int(b.end_x) + offset, int(b.end_y)))
+                pygame.draw.aaline(screen, (r, g, blue),
+                                  (int(b.start_x), int(b.start_y) + offset),
+                                  (int(b.end_x), int(b.end_y) + offset))
 
             # Core highlight
             if b.thickness > 4:
                 core_th = max(1, th // 3)
                 ca = int(220 * pulse)
-                pygame.draw.line(screen, (ca, 255, 255),
-                               (int(b.start_x), int(b.start_y)),
-                               (int(b.end_x), int(b.end_y)), core_th)
+                for offset in range(-core_th//2, core_th//2 + 1):
+                    pygame.draw.aaline(screen, (ca, 255, 255),
+                                      (int(b.start_x) + offset, int(b.start_y)),
+                                      (int(b.end_x) + offset, int(b.end_y)))
+                    pygame.draw.aaline(screen, (ca, 255, 255),
+                                      (int(b.start_x), int(b.start_y) + offset),
+                                      (int(b.end_x), int(b.end_y) + offset))
 
         # Particles with cached glow surfaces
         for p in self.particles:
@@ -284,7 +292,7 @@ class HolographicTree:
                 1 - (p.lifetime - p.max_lifetime * 0.6) / (p.max_lifetime * 0.4))
             a = p.alpha * fade * f
             sz = int(p.size * (0.7 + (p.z + 1) * 0.3))
-            sz = max(2, min(sz, 19))
+            sz = max(1, min(sz, 7))
 
             if sz in self.glow_surfaces:
                 glow = self.glow_surfaces[sz].copy()
@@ -402,10 +410,14 @@ def main():
         ui_color = (0, int(255 * f), int(255 * f))
 
         # Corner brackets
-        pygame.draw.line(screen, ui_color, (20, 20), (100, 20), 2)
-        pygame.draw.line(screen, ui_color, (20, 20), (20, 100), 2)
-        pygame.draw.line(screen, ui_color, (width - 100, 20), (width - 20, 20), 2)
-        pygame.draw.line(screen, ui_color, (width - 20, 20), (width - 20, 100), 2)
+        pygame.draw.aaline(screen, ui_color, (20, 20), (100, 20))
+        pygame.draw.aaline(screen, ui_color, (20, 21), (100, 21))
+        pygame.draw.aaline(screen, ui_color, (20, 20), (20, 100))
+        pygame.draw.aaline(screen, ui_color, (21, 20), (21, 100))
+        pygame.draw.aaline(screen, ui_color, (width - 100, 20), (width - 20, 20))
+        pygame.draw.aaline(screen, ui_color, (width - 100, 21), (width - 20, 21))
+        pygame.draw.aaline(screen, ui_color, (width - 20, 20), (width - 20, 100))
+        pygame.draw.aaline(screen, ui_color, (width - 21, 20), (width - 21, 100))
 
         # Text (only if font loaded successfully)
         if font:
