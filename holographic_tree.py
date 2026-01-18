@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-Holographic Tree - GPU Accelerated with Pygame
-Uses hardware-accelerated blitting for 60+ FPS
+Holographic Tree - GPU Accelerated with OpenGL Instancing
+Uses pyglet + moderngl for instanced branches and shader-based glow.
 """
 
-import pygame
-import pygame.gfxdraw
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from array import array
 import math
 import random
 import time
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List
+
+import moderngl
+import pyglet
 
 
 @dataclass
@@ -59,24 +63,6 @@ class AttachedLeaf:
     angle_offset: float
 
 
-@dataclass
-class Bird:
-    x: float
-    y: float
-    vx: float
-    vy: float
-    state: str
-    timer: float
-    wing_phase: float
-    wing_speed: float
-    facing: int
-    perch_index: int = -1
-    hop_count: int = 0
-    hops_before_depart: int = 2
-    hop_offset: Tuple[float, float] = (0.0, 0.0)
-    perch_wait: float = 3.0
-
-
 class WindSystem:
     def __init__(self):
         self.time = 0.0
@@ -111,7 +97,7 @@ class HolographicTree:
 
         self.branches: List[Branch] = []
         self.falling_leaves: List[FallingLeaf] = []
-        self.max_leaves = 15
+        self.max_leaves = 18
 
         self.sorted_branches: List[Branch] = []
         self.tip_branches: List[Branch] = []
@@ -119,59 +105,9 @@ class HolographicTree:
         self.attached_leaves: List[AttachedLeaf] = []
 
         self.root_x = width / 2
-        self.root_y = height - 50
-
-        # Leaf surface cache
-        self.leaf_surfaces = {}
-        self.leaf_rotation_cache = {}
-        self.bird = Bird(
-            x=-120,
-            y=height * 0.35,
-            vx=0.0,
-            vy=0.0,
-            state="approach",
-            timer=0.0,
-            wing_phase=0.0,
-            wing_speed=12.0,
-            facing=1,
-            hops_before_depart=random.randint(2, 4),
-            perch_wait=random.uniform(2.5, 4.5)
-        )
+        self.root_y = height - 80
 
         self.regenerate_tree()
-
-    @staticmethod
-    def draw_thick_aaline(surface, color, x1, y1, x2, y2, thickness):
-        """Draw a thick antialiased line using filled polygon with antialiased edges."""
-        if thickness <= 1:
-            pygame.gfxdraw.line(surface, int(x1), int(y1), int(x2), int(y2), color)
-            return
-
-        # Calculate perpendicular offset
-        dx = x2 - x1
-        dy = y2 - y1
-        length = math.sqrt(dx * dx + dy * dy)
-        if length == 0:
-            return
-
-        # Normalize and get perpendicular
-        dx /= length
-        dy /= length
-        px = -dy * thickness / 2
-        py = dx * thickness / 2
-
-        # Four corners of the thick line
-        points = [
-            (int(x1 + px), int(y1 + py)),
-            (int(x1 - px), int(y1 - py)),
-            (int(x2 - px), int(y2 - py)),
-            (int(x2 + px), int(y2 + py))
-        ]
-
-        # Draw filled polygon
-        pygame.gfxdraw.filled_polygon(surface, points, color)
-        # Draw antialiased outline
-        pygame.gfxdraw.aapolygon(surface, points, color)
 
     def regenerate_tree(self):
         self.branches.clear()
@@ -190,69 +126,29 @@ class HolographicTree:
                     size=random.uniform(6, 12),
                     angle_offset=random.uniform(-12, 12)
                 ))
-        self._reset_bird()
 
-    def _get_leaf_surface(self, size: int) -> tuple[pygame.Surface, tuple[float, float]]:
-        size = max(4, int(size))
-        if size in self.leaf_surfaces:
-            return self.leaf_surfaces[size]
-
-        surf = pygame.Surface((size * 4, size * 4), pygame.SRCALPHA)
-        cx_l, cy_l = size * 2, size * 2
-        body_w = int(size * 1.3)
-        body_h = int(size * 1.9)
-        body_rect = pygame.Rect(0, 0, body_w, body_h)
-        body_rect.center = (cx_l, cy_l + int(size * 0.2))
-        tip_height = int(size * 0.7)
-        tip_top = body_rect.top - tip_height
-        tip_left = body_rect.left + int(body_w * 0.15)
-        tip_right = body_rect.right - int(body_w * 0.15)
-        tip_points = [
-            (cx_l, tip_top),
-            (tip_right, body_rect.top + int(body_h * 0.2)),
-            (tip_left, body_rect.top + int(body_h * 0.2))
-        ]
-
-        # Base volume
-        base_color = (70, 200, 255, 160)
-        mid_color = (110, 235, 255, 190)
-        highlight_color = (190, 255, 255, 210)
-        outline_color = (200, 255, 255, 230)
-        shadow_color = (20, 90, 120, 140)
-        rim_color = (220, 255, 255, 240)
-
-        shadow_rect = body_rect.copy()
-        shadow_rect.center = (shadow_rect.centerx + int(size * 0.2),
-                              shadow_rect.centery + int(size * 0.25))
-        pygame.draw.ellipse(surf, shadow_color, shadow_rect)
-        pygame.draw.ellipse(surf, base_color, body_rect)
-        pygame.draw.polygon(surf, base_color, tip_points)
-
-        inner_rect = body_rect.inflate(-int(size * 0.3), -int(size * 0.3))
-        pygame.draw.ellipse(surf, mid_color, inner_rect)
-
-        highlight_rect = inner_rect.inflate(-int(size * 0.4), -int(size * 0.4))
-        highlight_rect.center = (highlight_rect.centerx - int(size * 0.25),
-                                 highlight_rect.centery - int(size * 0.25))
-        pygame.draw.ellipse(surf, highlight_color, highlight_rect)
-        rim_rect = body_rect.inflate(-int(size * 0.1), -int(size * 0.1))
-        pygame.draw.ellipse(surf, rim_color, rim_rect, 1)
-        vein_color = (180, 255, 255, 160)
-        pygame.draw.line(surf, vein_color, (cx_l, body_rect.top + int(size * 0.2)),
-                         (cx_l, body_rect.bottom - int(size * 0.2)), 1)
-
-        pygame.draw.ellipse(surf, outline_color, body_rect, 1)
-        pygame.draw.polygon(surf, outline_color, tip_points, 1)
-
-        # Stem
-        stem_length = max(4, int(size * 0.5))
-        stem_start = (cx_l, body_rect.bottom - 1)
-        stem_end = (cx_l, body_rect.bottom + stem_length)
-        pygame.draw.line(surf, outline_color, stem_start, stem_end, max(1, size // 6))
-
-        base_offset = (stem_end[0] - cx_l, stem_end[1] - cy_l)
-        self.leaf_surfaces[size] = (surf, base_offset)
-        return surf, base_offset
+    def _gen_branch(self, parent: int, angle: float, length: float, depth: int, max_d: int, z: float):
+        if depth >= max_d or length < 10:
+            return
+        stiff = 1.0 - (depth / max_d) * 0.85
+        nz = max(-1, min(1, z + random.uniform(-0.1, 0.1)))
+        b = Branch(parent, angle, length, max(2, (max_d - depth) * 2.5),
+                   depth, nz, stiff, depth * 0.3 + random.random() * 0.5)
+        point_count = random.randint(3, 6)
+        segment_count = max(2, point_count - 1)
+        weights = [random.uniform(0.6, 1.4) for _ in range(segment_count)]
+        total = sum(weights)
+        b.segment_fracs = [w / total for w in weights]
+        b.segment_jitter = [random.uniform(-8, 8) for _ in range(segment_count)]
+        b.segment_sway = [random.uniform(0.4, 1.0) for _ in range(segment_count)]
+        idx = len(self.branches)
+        self.branches.append(b)
+        spread = 24 + depth * 2
+        ratio = 0.72
+        self._gen_branch(idx, angle - spread, length * ratio, depth + 1, max_d, nz - 0.05)
+        self._gen_branch(idx, angle + spread, length * ratio, depth + 1, max_d, nz + 0.05)
+        if depth < 4 and random.random() > 0.5:
+            self._gen_branch(idx, angle + random.uniform(-12, 12), length * 0.55, depth + 2, max_d, nz)
 
     @staticmethod
     def _rotate_point(x: float, y: float, angle_deg: float) -> tuple[float, float]:
@@ -305,202 +201,10 @@ class HolographicTree:
         angle = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
         return p1, angle
 
-    def _reset_bird(self):
-        self.bird.state = "approach"
-        self.bird.timer = 0.0
-        self.bird.wing_phase = 0.0
-        self.bird.wing_speed = 12.0
-        self.bird.hop_count = 0
-        self.bird.hops_before_depart = random.randint(2, 4)
-        self.bird.perch_wait = random.uniform(2.5, 4.5)
-        self.bird.hop_offset = (0.0, 0.0)
-        self._assign_perch()
-        target = self._get_perch_point()
-        if target:
-            tx, ty, _ = target
-            self.bird.x = -120 if tx > self.w * 0.5 else self.w + 120
-            self.bird.y = ty - 120
-            self.bird.facing = 1 if tx > self.bird.x else -1
-        else:
-            self.bird.x = -120
-            self.bird.y = self.h * 0.35
-            self.bird.facing = 1
-
-    def _assign_perch(self):
-        if not self.tip_indices:
-            self.bird.perch_index = -1
-            return
-        self.bird.perch_index = random.choice(self.tip_indices)
-
-    def _get_perch_point(self) -> Optional[Tuple[float, float, float]]:
-        if self.bird.perch_index < 0 or self.bird.perch_index >= len(self.branches):
-            return None
-        branch = self.branches[self.bird.perch_index]
-        return branch.end_x, branch.end_y, branch.current_angle
-
-    def _update_bird(self, dt: float):
-        target = self._get_perch_point()
-        if not target:
-            return
-        tx, ty, angle = target
-        perch_y = ty - 6
-        self.bird.timer += dt
-
-        if self.bird.state == "approach":
-            self.bird.wing_speed = 12.0
-            dx = tx - self.bird.x
-            dy = perch_y - self.bird.y
-            dist = math.hypot(dx, dy)
-            if dist > 1:
-                step = min(dist, 220 * dt)
-                self.bird.x += dx / dist * step
-                self.bird.y += dy / dist * step
-                self.bird.facing = 1 if dx >= 0 else -1
-            if dist < 12:
-                self.bird.state = "land"
-                self.bird.timer = 0.0
-
-        elif self.bird.state == "land":
-            self.bird.wing_speed = 6.0
-            dx = tx - self.bird.x
-            dy = perch_y - self.bird.y
-            dist = math.hypot(dx, dy)
-            if dist > 0.5:
-                step = min(dist, 140 * dt)
-                self.bird.x += dx / dist * step
-                self.bird.y += dy / dist * step
-            if self.bird.timer > 0.45:
-                self.bird.state = "perched"
-                self.bird.timer = 0.0
-                self.bird.hop_offset = (0.0, 0.0)
-
-        elif self.bird.state == "perched":
-            self.bird.wing_speed = 0.0
-            bob = math.sin(self.time * 4.5) * 1.2
-            self.bird.x = tx
-            self.bird.y = perch_y + bob
-            if self.bird.timer > self.bird.perch_wait:
-                if self.bird.hop_count < self.bird.hops_before_depart:
-                    self.bird.state = "hop"
-                    self.bird.timer = 0.0
-                    self.bird.hop_count += 1
-                    hop_dx = math.cos(math.radians(angle)) * -8
-                    hop_dy = math.sin(math.radians(angle)) * -8
-                    self.bird.hop_offset = (hop_dx, hop_dy)
-                else:
-                    self.bird.state = "depart"
-                    self.bird.timer = 0.0
-                    self.bird.vx = self.bird.facing * 240
-                    self.bird.vy = -120
-
-        elif self.bird.state == "hop":
-            hop_time = 0.45
-            t = min(1.0, self.bird.timer / hop_time)
-            arc = math.sin(math.pi * t) * 6
-            hx, hy = self.bird.hop_offset
-            self.bird.x = tx + hx * t
-            self.bird.y = perch_y + hy * t - arc
-            if self.bird.timer >= hop_time:
-                self.bird.state = "perched"
-                self.bird.timer = 0.0
-                self.bird.perch_wait = random.uniform(1.2, 2.2)
-
-        elif self.bird.state == "depart":
-            self.bird.wing_speed = 13.0
-            self.bird.x += self.bird.vx * dt
-            self.bird.y += self.bird.vy * dt
-            self.bird.vy -= 30 * dt
-            if self.bird.x < -200 or self.bird.x > self.w + 200 or self.bird.y < -200:
-                self._reset_bird()
-
-        if self.bird.wing_speed > 0:
-            self.bird.wing_phase += self.bird.wing_speed * dt * 2 * math.pi
-
-    def _draw_bird(self, surface: pygame.Surface):
-        target = self._get_perch_point()
-        if not target:
-            return
-        bird = self.bird
-        body_color = (110, 235, 255)
-        belly_color = (160, 255, 255)
-        wing_color = (70, 200, 255)
-        shadow_color = (30, 120, 160)
-        beak_color = (255, 210, 80)
-
-        flap = math.sin(bird.wing_phase) if bird.wing_speed > 0 else 0.2
-        wing_span = 18 + 8 * abs(flap)
-        wing_lift = -6 - 5 * flap
-        facing = bird.facing
-
-        body_rect = pygame.Rect(0, 0, 28, 14)
-        body_rect.center = (int(bird.x), int(bird.y))
-        pygame.gfxdraw.filled_ellipse(surface, body_rect.centerx, body_rect.centery,
-                                      body_rect.width // 2, body_rect.height // 2, body_color)
-        pygame.gfxdraw.aaellipse(surface, body_rect.centerx, body_rect.centery,
-                                 body_rect.width // 2, body_rect.height // 2, belly_color)
-
-        belly_rect = pygame.Rect(0, 0, 20, 10)
-        belly_rect.center = (int(bird.x - 2 * facing), int(bird.y + 2))
-        pygame.gfxdraw.filled_ellipse(surface, belly_rect.centerx, belly_rect.centery,
-                                      belly_rect.width // 2, belly_rect.height // 2, belly_color)
-
-        head_center = (int(bird.x + 12 * facing), int(bird.y - 4))
-        pygame.gfxdraw.filled_circle(surface, head_center[0], head_center[1], 6, body_color)
-        pygame.gfxdraw.aacircle(surface, head_center[0], head_center[1], 6, belly_color)
-
-        beak = [
-            (head_center[0] + 6 * facing, head_center[1]),
-            (head_center[0] + 12 * facing, head_center[1] - 2),
-            (head_center[0] + 12 * facing, head_center[1] + 2)
-        ]
-        pygame.gfxdraw.filled_polygon(surface, beak, beak_color)
-        pygame.gfxdraw.aapolygon(surface, beak, beak_color)
-
-        tail = [
-            (int(bird.x - 14 * facing), int(bird.y)),
-            (int(bird.x - 24 * facing), int(bird.y - 4)),
-            (int(bird.x - 24 * facing), int(bird.y + 4))
-        ]
-        pygame.gfxdraw.filled_polygon(surface, tail, shadow_color)
-        pygame.gfxdraw.aapolygon(surface, tail, shadow_color)
-
-        wing_base = (int(bird.x - 2 * facing), int(bird.y - 2))
-        wing = [
-            wing_base,
-            (int(bird.x - wing_span * facing), int(bird.y + wing_lift)),
-            (int(bird.x - 6 * facing), int(bird.y + 8))
-        ]
-        pygame.gfxdraw.filled_polygon(surface, wing, wing_color)
-        pygame.gfxdraw.aapolygon(surface, wing, wing_color)
-
-    def _gen_branch(self, parent: int, angle: float, length: float, depth: int, max_d: int, z: float):
-        if depth >= max_d or length < 10:
-            return
-        stiff = 1.0 - (depth / max_d) * 0.85
-        nz = max(-1, min(1, z + random.uniform(-0.1, 0.1)))
-        b = Branch(parent, angle, length, max(2, (max_d - depth) * 2.5),
-                   depth, nz, stiff, depth * 0.3 + random.random() * 0.5)
-        point_count = random.randint(3, 6)
-        segment_count = max(2, point_count - 1)
-        weights = [random.uniform(0.6, 1.4) for _ in range(segment_count)]
-        total = sum(weights)
-        b.segment_fracs = [w / total for w in weights]
-        b.segment_jitter = [random.uniform(-8, 8) for _ in range(segment_count)]
-        b.segment_sway = [random.uniform(0.4, 1.0) for _ in range(segment_count)]
-        idx = len(self.branches)
-        self.branches.append(b)
-        spread = 24 + depth * 2
-        ratio = 0.72
-        self._gen_branch(idx, angle - spread, length * ratio, depth + 1, max_d, nz - 0.05)
-        self._gen_branch(idx, angle + spread, length * ratio, depth + 1, max_d, nz + 0.05)
-        if depth < 4 and random.random() > 0.5:
-            self._gen_branch(idx, angle + random.uniform(-12, 12), length * 0.55, depth + 2, max_d, nz)
-
     def update(self, dt: float):
         self.time += dt
         self.wind.update(dt)
 
-        # Update branches
         for b in self.branches:
             if b.parent_index < 0:
                 b.start_x, b.start_y = self.root_x, self.root_y
@@ -535,12 +239,10 @@ class HolographicTree:
             b.segment_points = points
             b.end_x, b.end_y = points[-1]
 
-        # Flicker
         self.flicker = 0.88 + 0.12 * math.sin(self.time * 10)
         if random.random() > 0.97:
             self.flicker *= 0.75
 
-        # Spawn leaves
         if len(self.falling_leaves) < self.max_leaves and self.tip_branches and random.random() > 0.988:
             tb = random.choice(self.tip_branches)
             self.falling_leaves.append(FallingLeaf(
@@ -551,7 +253,6 @@ class HolographicTree:
                 random.uniform(2, 4), 1.0, 0
             ))
 
-        # Update leaves
         ground = self.h - 60
         new_l = []
         for lf in self.falling_leaves:
@@ -574,94 +275,27 @@ class HolographicTree:
                 new_l.append(lf)
         self.falling_leaves = new_l
 
-        self._update_bird(dt)
-
-    def draw(self, screen: pygame.Surface):
+    def build_branch_instances(self) -> List[float]:
+        instances: List[float] = []
         f = self.flicker
-
-        # Background
-        screen.fill((4, 12, 28))
-
-        # Grid
-        cx, hy = self.w // 2, int(self.h * 0.35)
-        grid_color = (0, 50, 70)
-        for i in range(-8, 9, 2):
-            pygame.gfxdraw.line(screen, cx + i * 100, self.h, cx, hy, grid_color)
-        for i in range(8):
-            ratio = i / 8
-            y = self.h - int((self.h - hy) * (ratio ** 1.3))
-            sp = int((1 - ratio ** 1.3) * self.w * 0.6)
-            pygame.gfxdraw.line(screen, cx - sp, y, cx + sp, y, grid_color)
-
-        # Platform
-        py = self.h - 40
-        for i in range(4):
-            a = int((180 - i * 40) * f)
-            color = (0, a, a)
-            ew, eh = 420 + i * 60, 40 + i * 10
-            rect = pygame.Rect(cx - ew // 2, py - eh // 2, ew, eh)
-            pygame.gfxdraw.filled_ellipse(screen, rect.centerx, rect.centery, rect.width // 2, rect.height // 2,
-                                          (0, a // 3, a // 2, 40))
-            pygame.gfxdraw.aaellipse(screen, rect.centerx, rect.centery, rect.width // 2, rect.height // 2, color)
-
-        # Tree glow (using thick antialiased lines)
-        for b in self.sorted_branches:
-            zf = (b.z_depth + 1) / 2
-            depth_offset = int((1 - zf) * 6)
-            points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
-            if depth_offset:
-                for i in range(len(points) - 1):
-                    self.draw_thick_aaline(screen, (0, int(30 * f), int(50 * f)),
-                                          points[i][0] + depth_offset, points[i][1] + depth_offset,
-                                          points[i + 1][0] + depth_offset, points[i + 1][1] + depth_offset,
-                                          int(b.thickness + 12))
-            glow_thick = int(b.thickness + 10)
-            for i in range(len(points) - 1):
-                self.draw_thick_aaline(screen, (0, int(80 * f), int(120 * f)),
-                                      points[i][0], points[i][1], points[i + 1][0], points[i + 1][1],
-                                      glow_thick)
-            for px, py in points:
-                pygame.gfxdraw.filled_circle(screen, int(px), int(py), glow_thick // 2,
-                                             (0, int(80 * f), int(120 * f)))
-                pygame.gfxdraw.aacircle(screen, int(px), int(py), glow_thick // 2,
-                                        (0, int(90 * f), int(140 * f)))
-
-        # Tree branches
         for b in self.sorted_branches:
             zf = (b.z_depth + 1) / 2
             pulse = (0.88 + 0.12 * math.sin(self.time * 3 + b.phase_offset)) * f
-            r = int((60 + (1 - zf) * 50) * pulse)
-            g = int((200 + zf * 55) * pulse)
-            blue = int(255 * pulse)
-            th = max(1, int(b.thickness * (0.85 + zf * 0.3)))
-
-            # Draw thick antialiased branch
+            r = (60 + (1 - zf) * 50) * pulse / 255.0
+            g = (200 + zf * 55) * pulse / 255.0
+            blue = 255 * pulse / 255.0
+            color = (r, g, blue, 0.7)
+            th = max(1, b.thickness * (0.85 + zf * 0.3))
             points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
             for i in range(len(points) - 1):
-                shadow_offset = 2 + int((1 - zf) * 3)
-                back_offset = 3 + int((1 - zf) * 5)
-                self.draw_thick_aaline(screen, (0, int(25 * f), int(35 * f)),
-                                      points[i][0] + back_offset, points[i][1] + back_offset,
-                                      points[i + 1][0] + back_offset, points[i + 1][1] + back_offset, th + 6)
-                self.draw_thick_aaline(screen, (0, int(40 * f), int(60 * f)),
-                                      points[i][0] + shadow_offset, points[i][1] + shadow_offset,
-                                      points[i + 1][0] + shadow_offset, points[i + 1][1] + shadow_offset, th + 2)
-                self.draw_thick_aaline(screen, (r, g, blue),
-                                      points[i][0], points[i][1], points[i + 1][0], points[i + 1][1], th)
-            for px, py in points:
-                pygame.gfxdraw.filled_circle(screen, int(px), int(py), max(1, th // 2), (r, g, blue))
-                pygame.gfxdraw.aacircle(screen, int(px), int(py), max(1, th // 2), (r, g, blue))
+                x0, y0 = points[i]
+                x1, y1 = points[i + 1]
+                instances.extend([x0, y0, x1, y1, th, *color])
+        return instances
 
-            # Core highlight
-            if b.thickness > 4:
-                core_th = max(1, th // 3)
-                ca = int(220 * pulse)
-                for i in range(len(points) - 1):
-                    self.draw_thick_aaline(screen, (ca, 255, 255),
-                                          points[i][0], points[i][1], points[i + 1][0], points[i + 1][1],
-                                          core_th)
-
-        # Attached leaves
+    def build_leaf_instances(self) -> List[float]:
+        instances: List[float] = []
+        f = self.flicker
         for leaf in self.attached_leaves:
             if leaf.branch_index >= len(self.branches):
                 continue
@@ -671,168 +305,226 @@ class HolographicTree:
                 continue
             (attach_x, attach_y), tangent_angle = self._get_branch_point_and_angle(points, leaf.t)
             angle = tangent_angle + 180 + leaf.angle_offset + leaf.side * 6
-            a = 0.7 * f
-            size = int(leaf.size * (0.7 + (branch.z_depth + 1) * 0.15))
-            size = max(4, size)
+            size = leaf.size * (0.7 + (branch.z_depth + 1) * 0.15)
             zf = (branch.z_depth + 1) / 2
-            shadow_offset = 2 + int((1 - zf) * 3)
+            color = (0.6 + zf * 0.4, 0.95, 1.0, 0.6 * f)
+            instances.extend([attach_x, attach_y, size, math.radians(angle), *color])
 
-            rotated_base, base_rot = self._get_rotated_leaf(size, angle)
-            rotated = rotated_base.copy()
-            x = attach_x - base_rot[0]
-            y = attach_y - base_rot[1]
-            rect = rotated.get_rect(center=(int(x), int(y)))
-            shadow = rotated.copy()
-            shadow.fill((30, 90, 120, 140), special_flags=pygame.BLEND_RGBA_MULT)
-            shadow_rect = shadow.get_rect(center=(int(x + shadow_offset), int(y + shadow_offset)))
-            shadow.set_alpha(int(200 * a))
-            screen.blit(shadow, shadow_rect, special_flags=pygame.BLEND_ALPHA_SDL2)
-
-            rotated.set_alpha(int(255 * a))
-            screen.blit(rotated, rect, special_flags=pygame.BLEND_ADD)
-
-            highlight = rotated.copy()
-            highlight.fill((220, 255, 255, 200), special_flags=pygame.BLEND_RGBA_MULT)
-            highlight_rect = highlight.get_rect(center=(int(x - 1), int(y - 1)))
-            highlight.set_alpha(int(120 * a))
-            screen.blit(highlight, highlight_rect, special_flags=pygame.BLEND_ADD)
-
-        # Leaves
         for lf in self.falling_leaves:
-            sz = int(lf.size * (0.8 + (lf.z + 1) * 0.2))
-            a = lf.alpha * f
-            zf = (lf.z + 1) / 2
-            shadow_offset = 2 + int((1 - zf) * 4)
+            size = lf.size * (0.8 + (lf.z + 1) * 0.2)
+            color = (0.6, 0.9, 1.0, lf.alpha * f)
+            instances.extend([lf.x, lf.y, size, math.radians(lf.rotation), *color])
 
-            rotated_base, _ = self._get_rotated_leaf(sz, lf.rotation)
-            rotated = rotated_base.copy()
-            rect = rotated.get_rect(center=(int(lf.x), int(lf.y)))
+        return instances
 
-            shadow = rotated.copy()
-            shadow.fill((20, 80, 120, 140), special_flags=pygame.BLEND_RGBA_MULT)
-            shadow_rect = shadow.get_rect(center=(int(lf.x + shadow_offset), int(lf.y + shadow_offset)))
-            shadow.set_alpha(int(200 * a))
-            screen.blit(shadow, shadow_rect, special_flags=pygame.BLEND_ALPHA_SDL2)
 
-            rotated.set_alpha(int(255 * a))
-            screen.blit(rotated, rect, special_flags=pygame.BLEND_ADD)
+class OpenGLRenderer:
+    def __init__(self, window: pyglet.window.Window, tree: HolographicTree):
+        self.window = window
+        self.tree = tree
+        self.ctx = moderngl.create_context()
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = moderngl.ONE, moderngl.ONE
 
-            highlight = rotated.copy()
-            highlight.fill((220, 255, 255, 200), special_flags=pygame.BLEND_RGBA_MULT)
-            highlight_rect = highlight.get_rect(center=(int(lf.x - 1), int(lf.y - 1)))
-            highlight.set_alpha(int(110 * a))
-            screen.blit(highlight, highlight_rect, special_flags=pygame.BLEND_ADD)
+        self.branch_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec2 in_pos;
+                in vec2 in_start;
+                in vec2 in_end;
+                in float in_thickness;
+                in vec4 in_color;
 
-        self._draw_bird(screen)
+                uniform vec2 u_resolution;
+                uniform float u_thickness_scale;
+
+                out vec2 v_local;
+                out vec4 v_color;
+
+                void main() {
+                    vec2 dir = in_end - in_start;
+                    float len = length(dir);
+                    if (len < 0.0001) {
+                        len = 0.0001;
+                    }
+                    vec2 dir_n = dir / len;
+                    vec2 normal = vec2(-dir_n.y, dir_n.x);
+                    float half_thick = in_thickness * 0.5 * u_thickness_scale;
+                    float along = (in_pos.x + 1.0) * 0.5 * len;
+                    vec2 world = in_start + dir_n * along + normal * (in_pos.y * half_thick);
+                    vec2 ndc = vec2((world.x / u_resolution.x) * 2.0 - 1.0,
+                                    (world.y / u_resolution.y) * 2.0 - 1.0);
+                    gl_Position = vec4(ndc, 0.0, 1.0);
+                    v_local = vec2((in_pos.x + 1.0) * 0.5, in_pos.y);
+                    v_color = in_color;
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                in vec2 v_local;
+                in vec4 v_color;
+
+                uniform float u_glow;
+
+                out vec4 f_color;
+
+                void main() {
+                    float edge = abs(v_local.y);
+                    float core = smoothstep(1.0, 0.0, edge);
+                    float glow = exp(-edge * 4.0) * u_glow;
+                    float alpha = (v_color.a * core) + glow;
+                    f_color = vec4(v_color.rgb, alpha);
+                }
+            """,
+        )
+
+        self.leaf_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec2 in_pos;
+                in vec2 in_center;
+                in float in_size;
+                in float in_rotation;
+                in vec4 in_color;
+
+                uniform vec2 u_resolution;
+
+                out vec2 v_uv;
+                out vec4 v_color;
+
+                void main() {
+                    float c = cos(in_rotation);
+                    float s = sin(in_rotation);
+                    vec2 rotated = vec2(in_pos.x * c - in_pos.y * s,
+                                        in_pos.x * s + in_pos.y * c);
+                    vec2 world = in_center + rotated * in_size;
+                    vec2 ndc = vec2((world.x / u_resolution.x) * 2.0 - 1.0,
+                                    (world.y / u_resolution.y) * 2.0 - 1.0);
+                    gl_Position = vec4(ndc, 0.0, 1.0);
+                    v_uv = in_pos;
+                    v_color = in_color;
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                in vec2 v_uv;
+                in vec4 v_color;
+
+                out vec4 f_color;
+
+                void main() {
+                    float dist = length(v_uv);
+                    float alpha = exp(-dist * 2.5);
+                    f_color = vec4(v_color.rgb, v_color.a * alpha);
+                }
+            """,
+        )
+
+        quad = [
+            -1.0, -1.0,
+            1.0, -1.0,
+            1.0, 1.0,
+            -1.0, -1.0,
+            1.0, 1.0,
+            -1.0, 1.0,
+        ]
+        self.quad_vbo = self.ctx.buffer(data=array('f', quad))
+
+        self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 32)
+        self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 16)
+
+        self.branch_vao = self.ctx.vertex_array(
+            self.branch_program,
+            [
+                (self.quad_vbo, "2f", "in_pos"),
+                (self.branch_instance_vbo, "2f 2f f 4f /i",
+                 "in_start", "in_end", "in_thickness", "in_color"),
+            ],
+        )
+
+        self.leaf_vao = self.ctx.vertex_array(
+            self.leaf_program,
+            [
+                (self.quad_vbo, "2f", "in_pos"),
+                (self.leaf_instance_vbo, "2f f f 4f /i",
+                 "in_center", "in_size", "in_rotation", "in_color"),
+            ],
+        )
+
+    def render(self):
+        width, height = self.window.get_framebuffer_size()
+        self.ctx.viewport = (0, 0, width, height)
+        self.ctx.clear(0.015, 0.05, 0.11)
+
+        branch_instances = self.tree.build_branch_instances()
+        if branch_instances:
+            data = array('f', branch_instances)
+            self.branch_instance_vbo.orphan(len(data) * 4)
+            self.branch_instance_vbo.write(data)
+
+            self.branch_program["u_resolution"].value = (width, height)
+
+            self.branch_program["u_thickness_scale"].value = 3.0
+            self.branch_program["u_glow"].value = 0.6
+            self.branch_vao.render(instances=len(branch_instances) // 9)
+
+            self.branch_program["u_thickness_scale"].value = 1.0
+            self.branch_program["u_glow"].value = 0.0
+            self.branch_vao.render(instances=len(branch_instances) // 9)
+
+        leaf_instances = self.tree.build_leaf_instances()
+        if leaf_instances:
+            data = array('f', leaf_instances)
+            self.leaf_instance_vbo.orphan(len(data) * 4)
+            self.leaf_instance_vbo.write(data)
+            self.leaf_program["u_resolution"].value = (width, height)
+            self.leaf_vao.render(instances=len(leaf_instances) // 8)
+
+
+class HolographicWindow(pyglet.window.Window):
+    def __init__(self):
+        display = pyglet.display.get_display()
+        screen = display.get_default_screen()
+        config = pyglet.gl.Config(double_buffer=True, sample_buffers=1, samples=4)
+        super().__init__(
+            width=screen.width,
+            height=screen.height,
+            fullscreen=True,
+            caption="Holographic Tree",
+            config=config,
+        )
+        self.set_mouse_visible(False)
+
+        self.tree = HolographicTree(self.width, self.height)
+        self.renderer = OpenGLRenderer(self, self.tree)
+
+        self.last_time = time.perf_counter()
+        self.frame_times: List[float] = []
+        pyglet.clock.schedule_interval(self.update, 1 / 120.0)
+
+    def on_key_press(self, symbol, modifiers):
+        if symbol == pyglet.window.key.ESCAPE:
+            self.close()
+        elif symbol in (pyglet.window.key.R, pyglet.window.key.SPACE):
+            self.tree.regenerate_tree()
+
+    def update(self, _dt):
+        now = time.perf_counter()
+        dt = now - self.last_time
+        self.last_time = now
+        self.frame_times.append(dt)
+        if len(self.frame_times) > 60:
+            self.frame_times.pop(0)
+        self.tree.update(dt)
+
+    def on_draw(self):
+        self.clear()
+        self.renderer.render()
 
 
 def main():
-    pygame.init()
-
-    # Try to load font, but continue without it if there's a circular import issue (Python 3.14)
-    font = None
-    use_freetype = False
-    try:
-        from pygame import freetype
-        font = freetype.SysFont("Courier", 16)
-        use_freetype = True
-    except ImportError:
-        print("Warning: Could not load pygame.freetype due to circular import (Python 3.14 issue)")
-        pygame.font.init()
-        try:
-            font = pygame.font.SysFont("Courier", 16)
-        except Exception:
-            font = pygame.font.Font(None, 16)
-
-    # Get primary display
-    info = pygame.display.Info()
-    width, height = info.current_w, info.current_h
-
-    # Fullscreen with hardware acceleration
-    screen = pygame.display.set_mode((width, height),
-                                      pygame.FULLSCREEN | pygame.HWSURFACE | pygame.DOUBLEBUF)
-    pygame.display.set_caption("Holographic Tree")
-    pygame.mouse.set_visible(False)
-
-    clock = pygame.time.Clock()
-    tree = HolographicTree(width, height)
-
-    running = True
-    frame_times = []
-    last_time = time.perf_counter()
-
-    while running:
-        # Events
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
-                elif event.key in (pygame.K_r, pygame.K_SPACE):
-                    tree.regenerate_tree()
-                elif event.key == pygame.K_f:
-                    pygame.display.toggle_fullscreen()
-
-        # FPS calculation
-        now = time.perf_counter()
-        dt = now - last_time
-        last_time = now
-        frame_times.append(dt)
-        if len(frame_times) > 60:
-            frame_times.pop(0)
-        fps = 1.0 / (sum(frame_times) / len(frame_times)) if frame_times else 60
-
-        # Update
-        tree.update(dt)
-
-        # Draw
-        tree.draw(screen)
-
-        # UI overlay
-        f = tree.flicker
-        ui_color = (0, int(255 * f), int(255 * f))
-
-        # Corner brackets (using thick antialiased lines)
-        HolographicTree.draw_thick_aaline(screen, ui_color, 20, 20, 100, 20, 2)
-        HolographicTree.draw_thick_aaline(screen, ui_color, 20, 20, 20, 100, 2)
-        HolographicTree.draw_thick_aaline(screen, ui_color, width - 100, 20, width - 20, 20, 2)
-        HolographicTree.draw_thick_aaline(screen, ui_color, width - 20, 20, width - 20, 100, 2)
-
-        # Text
-        if font:
-            texts = [
-                "HOLOGRAPHIC PROJECTION ACTIVE",
-                f"BRANCHES: {len(tree.branches)}",
-                f"WIND: {tree.wind.gust_strength:.1f}",
-                f"FPS: {fps:.1f}"
-            ]
-            for i, text in enumerate(texts):
-                pos = (30, 40 + i * 22)
-                if use_freetype:
-                    font.render_to(screen, pos, text, ui_color)
-                else:
-                    text_surface = font.render(text, True, ui_color)
-                    screen.blit(text_surface, pos)
-
-            # Bottom status
-            bottom_texts = [
-                "QUANTUM COHERENCE: STABLE",
-                "DIMENSIONAL MATRIX: SYNCHRONIZED",
-                "PHOTON FIELD: ACTIVE"
-            ]
-            for i, text in enumerate(bottom_texts):
-                pos = (30, height - 90 + i * 22)
-                if use_freetype:
-                    font.render_to(screen, pos, text, ui_color)
-                else:
-                    text_surface = font.render(text, True, ui_color)
-                    screen.blit(text_surface, pos)
-
-        pygame.display.flip()
-        clock.tick(165)  # Match your 165Hz monitor
-
-    pygame.quit()
+    window = HolographicWindow()
+    pyglet.app.run()
 
 
 if __name__ == "__main__":
