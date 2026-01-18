@@ -343,8 +343,14 @@ class HolographicTree:
 def main():
     pygame.init()
 
-    # Import freetype after pygame.init() to avoid circular import on Python 3.14
-    from pygame import freetype
+    # Try to load font, but continue without it if there's a circular import issue (Python 3.14)
+    font = None
+    try:
+        from pygame import freetype
+        font = freetype.SysFont("Courier", 16)
+    except ImportError:
+        print("Warning: Could not load pygame.freetype due to circular import (Python 3.14 issue)")
+        print("Running without text overlay...")
 
     # Get primary display
     info = pygame.display.Info()
@@ -358,8 +364,6 @@ def main():
 
     clock = pygame.time.Clock()
     tree = HolographicTree(width, height)
-
-    font = freetype.SysFont("Courier", 16)
 
     running = True
     frame_times = []
@@ -403,25 +407,26 @@ def main():
         pygame.draw.line(screen, ui_color, (width - 100, 20), (width - 20, 20), 2)
         pygame.draw.line(screen, ui_color, (width - 20, 20), (width - 20, 100), 2)
 
-        # Text
-        texts = [
-            "HOLOGRAPHIC PROJECTION ACTIVE",
-            f"PARTICLES: {len(tree.particles)}",
-            f"BRANCHES: {len(tree.branches)}",
-            f"WIND: {tree.wind.gust_strength:.1f}",
-            f"FPS: {fps:.1f}"
-        ]
-        for i, text in enumerate(texts):
-            font.render_to(screen, (30, 40 + i * 22), text, ui_color)
+        # Text (only if font loaded successfully)
+        if font:
+            texts = [
+                "HOLOGRAPHIC PROJECTION ACTIVE",
+                f"PARTICLES: {len(tree.particles)}",
+                f"BRANCHES: {len(tree.branches)}",
+                f"WIND: {tree.wind.gust_strength:.1f}",
+                f"FPS: {fps:.1f}"
+            ]
+            for i, text in enumerate(texts):
+                font.render_to(screen, (30, 40 + i * 22), text, ui_color)
 
-        # Bottom status
-        bottom_texts = [
-            "QUANTUM COHERENCE: STABLE",
-            "DIMENSIONAL MATRIX: SYNCHRONIZED",
-            "PHOTON FIELD: ACTIVE"
-        ]
-        for i, text in enumerate(bottom_texts):
-            font.render_to(screen, (30, height - 90 + i * 22), text, ui_color)
+            # Bottom status
+            bottom_texts = [
+                "QUANTUM COHERENCE: STABLE",
+                "DIMENSIONAL MATRIX: SYNCHRONIZED",
+                "PHOTON FIELD: ACTIVE"
+            ]
+            for i, text in enumerate(bottom_texts):
+                font.render_to(screen, (30, height - 90 + i * 22), text, ui_color)
 
         pygame.display.flip()
         clock.tick(165)  # Match your 165Hz monitor
