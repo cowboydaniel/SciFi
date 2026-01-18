@@ -11,12 +11,13 @@ import random
 from dataclasses import dataclass
 from typing import List
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
+from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtCore import Qt, QTimer, QPointF, QRectF
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QRadialGradient,
-    QLinearGradient, QPainterPath, QFont, QImage
+    QLinearGradient, QPainterPath, QFont, QSurfaceFormat
 )
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 
 @dataclass
@@ -101,14 +102,18 @@ class WindSystem:
         return total * height_factor
 
 
-class HolographicTree(QWidget):
-    """Main holographic tree visualization - OPTIMIZED"""
+class HolographicTree(QOpenGLWidget):
+    """Main holographic tree visualization - GPU ACCELERATED"""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Holographic Tree")
-        self.setStyleSheet("background-color: black;")
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+
+        # Enable OpenGL acceleration
+        fmt = QSurfaceFormat()
+        fmt.setSamples(4)  # Anti-aliasing
+        fmt.setSwapInterval(1)  # VSync
+        self.setFormat(fmt)
 
         # Animation state
         self.time = 0.0
