@@ -825,13 +825,12 @@ class HolographicTree:
             y_spread = max(tip_ys) - min(tip_ys)
             z_spread = max(tip_zs) - min(tip_zs)
 
-            # Oak canopy is wider than tall, with some padding
-            # Use max spread as reference, scale others relative to it
-            max_spread = max(x_spread, y_spread, z_spread)
+            # Oak canopy should be LARGER than branch tips to fill gaps
+            # Add significant padding to create dense, full canopy
             canopy_radii = (
-                max_spread * 0.65,   # rx: horizontal width
-                max_spread * 0.45,   # ry: vertical height (shorter for oak)
-                max_spread * 0.60    # rz: depth
+                x_spread * 0.75,   # rx: horizontal width (extend beyond tips)
+                y_spread * 0.60,   # ry: vertical height (shorter for oak, but still full)
+                z_spread * 0.70    # rz: depth (extend beyond tips)
             )
 
             print(f"Canopy center: ({canopy_center[0]:.1f}, {canopy_center[1]:.1f}, {canopy_center[2]:.1f})")
@@ -842,13 +841,13 @@ class HolographicTree:
             canopy_center = (self.root_x, self.h * 0.55, 0.0)
             canopy_radii = (120.0, 70.0, 100.0)
 
-        # Target 18000 leaves (mid-range for good FPS)
-        # With ~100 leaves per cluster, we need ~180 clusters
-        num_clusters = 180
+        # Increase cluster count to fill the larger volume densely
+        # Target ~20000 leaves with 80-120 per cluster = ~200 clusters
+        num_clusters = 250
 
         for cluster_idx in range(num_clusters):
-            # Skip ~20% of clusters for negative space (holes in canopy)
-            if random.random() < 0.2:
+            # Skip ~15% of clusters for negative space (reduced from 20% for denser coverage)
+            if random.random() < 0.15:
                 continue
 
             # Generate random direction on unit sphere
@@ -858,9 +857,10 @@ class HolographicTree:
             dir_y = math.sin(phi) * math.sin(theta)
             dir_z = math.cos(phi)
 
-            # Bias radius to outer shell (lerp from 0.55 to 1.0 with power curve)
-            rand_r = random.random() ** 0.25  # Power curve heavily biases toward 1.0
-            r = 0.55 + rand_r * 0.45  # Map to [0.55, 1.0]
+            # Distribute throughout volume with mild bias to outer shell
+            # Use gentler power curve and wider range to fill interior
+            rand_r = random.random() ** 0.6  # Gentler bias (was 0.25)
+            r = 0.35 + rand_r * 0.65  # Map to [0.35, 1.0] to fill more interior
 
             # Position in ellipsoid
             cluster_x = canopy_center[0] + dir_x * canopy_radii[0] * r
@@ -903,10 +903,10 @@ class HolographicTree:
             # Cluster radius for spreading leaves within cluster
             # Use a fraction of the average canopy radius
             avg_radius = (canopy_radii[0] + canopy_radii[1] + canopy_radii[2]) / 3.0
-            cluster_radius = avg_radius * 0.08
+            cluster_radius = avg_radius * 0.12  # Increased from 0.08 for fuller clusters
 
-            # Create 60-140 tiny leaf cards per cluster
-            leaves_per_cluster = random.randint(60, 140)
+            # Create 70-120 leaf cards per cluster (tightened range for consistency)
+            leaves_per_cluster = random.randint(70, 120)
             for card_idx in range(leaves_per_cluster):
                 atlas_index, uv_offset, uv_scale, color_variance, variance_amount = (
                     self._make_leaf_style(branch.variation_seed + cluster_idx * 3.17 + card_idx * 1.23)
