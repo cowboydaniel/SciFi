@@ -5,6 +5,7 @@ Uses hardware-accelerated blitting for 60+ FPS
 """
 
 import pygame
+import pygame.gfxdraw
 import math
 import random
 import time
@@ -115,6 +116,39 @@ class HolographicTree:
         self.leaf_surfaces = {}
 
         self.regenerate_tree()
+
+    @staticmethod
+    def draw_thick_aaline(surface, color, x1, y1, x2, y2, thickness):
+        """Draw a thick antialiased line using filled polygon with antialiased edges."""
+        if thickness <= 1:
+            pygame.gfxdraw.line(surface, int(x1), int(y1), int(x2), int(y2), color)
+            return
+
+        # Calculate perpendicular offset
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx * dx + dy * dy)
+        if length == 0:
+            return
+
+        # Normalize and get perpendicular
+        dx /= length
+        dy /= length
+        px = -dy * thickness / 2
+        py = dx * thickness / 2
+
+        # Four corners of the thick line
+        points = [
+            (int(x1 + px), int(y1 + py)),
+            (int(x1 - px), int(y1 - py)),
+            (int(x2 - px), int(y2 - py)),
+            (int(x2 + px), int(y2 + py))
+        ]
+
+        # Draw filled polygon
+        pygame.gfxdraw.filled_polygon(surface, points, color)
+        # Draw antialiased outline
+        pygame.gfxdraw.aapolygon(surface, points, color)
 
     def regenerate_tree(self):
         self.branches.clear()
@@ -230,12 +264,12 @@ class HolographicTree:
         cx, hy = self.w // 2, int(self.h * 0.35)
         grid_color = (0, 50, 70)
         for i in range(-8, 9, 2):
-            pygame.draw.aaline(screen, grid_color, (cx + i * 100, self.h), (cx, hy))
+            pygame.gfxdraw.line(screen, cx + i * 100, self.h, cx, hy, grid_color)
         for i in range(8):
             ratio = i / 8
             y = self.h - int((self.h - hy) * (ratio ** 1.3))
             sp = int((1 - ratio ** 1.3) * self.w * 0.6)
-            pygame.draw.aaline(screen, grid_color, (cx - sp, y), (cx + sp, y))
+            pygame.gfxdraw.line(screen, cx - sp, y, cx + sp, y, grid_color)
 
         # Platform
         py = self.h - 40
@@ -246,15 +280,11 @@ class HolographicTree:
             rect = pygame.Rect(cx - ew // 2, py - eh // 2, ew, eh)
             pygame.draw.ellipse(screen, color, rect, 2)
 
-        # Tree glow (single pass, using aalines for smoothness)
+        # Tree glow (using thick antialiased lines)
         for b in self.sorted_branches:
-            ga = int(40 * f * (0.6 + (b.z_depth + 1) * 0.2))
-            color = (0, int(150 * f), int(200 * f), ga)
-            # Thick glow line
-            for offset in range(-2, 3):
-                pygame.draw.aaline(screen, (0, int(80 * f), int(120 * f)),
-                                  (b.start_x + offset, b.start_y),
-                                  (b.end_x + offset, b.end_y))
+            glow_thick = int(b.thickness + 6)
+            self.draw_thick_aaline(screen, (0, int(80 * f), int(120 * f)),
+                                  b.start_x, b.start_y, b.end_x, b.end_y, glow_thick)
 
         # Tree branches
         for b in self.sorted_branches:
@@ -265,26 +295,16 @@ class HolographicTree:
             blue = int(255 * pulse)
             th = max(1, int(b.thickness * (0.85 + zf * 0.3)))
 
-            # Draw multiple antialiased lines for thickness
-            for offset in range(-th//2, th//2 + 1):
-                pygame.draw.aaline(screen, (r, g, blue),
-                                  (int(b.start_x) + offset, int(b.start_y)),
-                                  (int(b.end_x) + offset, int(b.end_y)))
-                pygame.draw.aaline(screen, (r, g, blue),
-                                  (int(b.start_x), int(b.start_y) + offset),
-                                  (int(b.end_x), int(b.end_y) + offset))
+            # Draw thick antialiased branch
+            self.draw_thick_aaline(screen, (r, g, blue),
+                                  b.start_x, b.start_y, b.end_x, b.end_y, th)
 
             # Core highlight
             if b.thickness > 4:
                 core_th = max(1, th // 3)
                 ca = int(220 * pulse)
-                for offset in range(-core_th//2, core_th//2 + 1):
-                    pygame.draw.aaline(screen, (ca, 255, 255),
-                                      (int(b.start_x) + offset, int(b.start_y)),
-                                      (int(b.end_x) + offset, int(b.end_y)))
-                    pygame.draw.aaline(screen, (ca, 255, 255),
-                                      (int(b.start_x), int(b.start_y) + offset),
-                                      (int(b.end_x), int(b.end_y) + offset))
+                self.draw_thick_aaline(screen, (ca, 255, 255),
+                                      b.start_x, b.start_y, b.end_x, b.end_y, core_th)
 
         # Particles with cached glow surfaces
         for p in self.particles:
@@ -409,15 +429,11 @@ def main():
         f = tree.flicker
         ui_color = (0, int(255 * f), int(255 * f))
 
-        # Corner brackets
-        pygame.draw.aaline(screen, ui_color, (20, 20), (100, 20))
-        pygame.draw.aaline(screen, ui_color, (20, 21), (100, 21))
-        pygame.draw.aaline(screen, ui_color, (20, 20), (20, 100))
-        pygame.draw.aaline(screen, ui_color, (21, 20), (21, 100))
-        pygame.draw.aaline(screen, ui_color, (width - 100, 20), (width - 20, 20))
-        pygame.draw.aaline(screen, ui_color, (width - 100, 21), (width - 20, 21))
-        pygame.draw.aaline(screen, ui_color, (width - 20, 20), (width - 20, 100))
-        pygame.draw.aaline(screen, ui_color, (width - 21, 20), (width - 21, 100))
+        # Corner brackets (using thick antialiased lines)
+        HolographicTree.draw_thick_aaline(screen, ui_color, 20, 20, 100, 20, 2)
+        HolographicTree.draw_thick_aaline(screen, ui_color, 20, 20, 20, 100, 2)
+        HolographicTree.draw_thick_aaline(screen, ui_color, width - 100, 20, width - 20, 20, 2)
+        HolographicTree.draw_thick_aaline(screen, ui_color, width - 20, 20, width - 20, 100, 2)
 
         # Text (only if font loaded successfully)
         if font:
