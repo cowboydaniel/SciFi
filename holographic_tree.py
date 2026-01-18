@@ -1560,7 +1560,7 @@ class OpenGLRenderer:
 
         self.ground_shadow_vao = self.ctx.vertex_array(
             self.ground_shadow_program,
-            [(self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv")],
+            [(self.ground_vbo, "3f 20x", "in_pos")],
         )
 
         self.bird_vao = self.ctx.vertex_array(
