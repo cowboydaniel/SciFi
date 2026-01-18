@@ -629,7 +629,15 @@ class HolographicTree:
             return
         stiff = 1.0 - (depth / max_d) * 0.85
         nz = max(-1, min(1, z + random.uniform(-0.1, 0.1)))
-        b = Branch(parent, angle, length, max(2, (max_d - depth) * 2.5),
+
+        # Improved tapering: exponential taper with depth
+        # Base thickness for trunk (depth 0)
+        base_thickness = 22.0
+        thickness = base_thickness * (0.68 ** depth)
+        # Clamp minimum thickness for visibility
+        thickness = max(1.5, thickness)
+
+        b = Branch(parent, angle, length, thickness,
                    depth, nz, stiff, depth * 0.3 + random.random() * 0.5)
         b.variation_seed = random.random() * 1000.0
         rng = random.Random(b.variation_seed)
@@ -650,10 +658,19 @@ class HolographicTree:
         b.segment_sway = [random.uniform(0.4, 1.0) for _ in range(segment_count)]
         idx = len(self.branches)
         self.branches.append(b)
+
+        # Oak-like branching: wider spread and slight horizontal curve for main boughs
         spread = 24 + depth * 2
         ratio = 0.72
-        self._gen_branch(idx, angle - spread, length * ratio, depth + 1, max_d, nz - 0.05)
-        self._gen_branch(idx, angle + spread, length * ratio, depth + 1, max_d, nz + 0.05)
+
+        # Add slight curve to main branches (depth < 3) to spread horizontally
+        branch_curve = 0.0
+        if depth < 3:
+            # Main boughs curve outward more for oak silhouette
+            branch_curve = random.uniform(3, 8) * (1 if random.random() > 0.5 else -1)
+
+        self._gen_branch(idx, angle - spread + branch_curve, length * ratio, depth + 1, max_d, nz - 0.05)
+        self._gen_branch(idx, angle + spread + branch_curve, length * ratio, depth + 1, max_d, nz + 0.05)
         if depth < 4 and random.random() > 0.5:
             self._gen_branch(idx, angle + random.uniform(-12, 12), length * 0.55, depth + 2, max_d, nz)
 
@@ -780,42 +797,63 @@ class HolographicTree:
 
     def _build_canopy_leaves(self):
         """
-        Build improved canopy with oak-like distribution:
-        - Ellipsoidal volume above trunk
+        Build dense oak-like canopy with 12K-25K tiny leaves in clusters:
+        - Ellipsoidal canopy shell relative to trunk height
         - Clusters biased to outer shell
+        - Drooping edges for realistic oak shape
         - Negative space (random gaps)
-        - Multiple small cards per cluster
+        - 60-140 tiny leaf cards per cluster
         """
         self.canopy_leaves = []
 
-        # Define canopy ellipsoid volume (centered above trunk, wider than tall)
-        canopy_center_y = self.h * 0.55  # Height of canopy center
-        canopy_radii = (120.0, 70.0, 100.0)  # (rx wide, ry shorter, rz wide)
+        # Define trunk height from initial tree generation (depth 0 length = 180)
+        trunk_height = 180.0
 
-        # Number of cluster points
-        num_clusters = 80
+        # Define canopy ellipsoid parameters relative to trunk height
+        canopy_center = (
+            self.root_x,
+            self.root_y + trunk_height * 0.78,
+            0.0
+        )
+        canopy_radii = (
+            trunk_height * 0.95,   # rx: wide horizontally
+            trunk_height * 0.42,   # ry: shorter vertically (oak is wide, not tall)
+            trunk_height * 0.85    # rz: wide in depth
+        )
+
+        # Target 18000 leaves (mid-range for good FPS)
+        # With ~100 leaves per cluster, we need ~180 clusters
+        num_clusters = 180
 
         for cluster_idx in range(num_clusters):
-            # Skip 20% of clusters for negative space
+            # Skip ~20% of clusters for negative space (holes in canopy)
             if random.random() < 0.2:
                 continue
 
-            # Generate cluster position biased to outer shell
+            # Generate random direction on unit sphere
             theta = random.uniform(0.0, math.tau)
             phi = math.acos(random.uniform(-1.0, 1.0))
-
-            # Bias radius to outer shell (lerp from 0.55 to 1.0 with power curve)
-            r = random.random() ** 0.35  # Power curve biases towards 1.0
-            r = 0.55 + r * 0.45  # Map to [0.55, 1.0]
-
-            # Convert to Cartesian in ellipsoid
             dir_x = math.sin(phi) * math.cos(theta)
             dir_y = math.sin(phi) * math.sin(theta)
             dir_z = math.cos(phi)
 
-            cluster_x = self.root_x + dir_x * canopy_radii[0] * r
-            cluster_y = canopy_center_y + dir_y * canopy_radii[1] * r
-            cluster_z = dir_z * canopy_radii[2] * r
+            # Bias radius to outer shell (lerp from 0.55 to 1.0 with power curve)
+            rand_r = random.random() ** 0.25  # Power curve heavily biases toward 1.0
+            r = 0.55 + rand_r * 0.45  # Map to [0.55, 1.0]
+
+            # Position in ellipsoid
+            cluster_x = canopy_center[0] + dir_x * canopy_radii[0] * r
+            cluster_y = canopy_center[1] + dir_y * canopy_radii[1] * r
+            cluster_z = canopy_center[2] + dir_z * canopy_radii[2] * r
+
+            # Apply droop to canopy edges (oak trees droop at the edges)
+            # Calculate distance from center in XZ plane
+            dx = cluster_x - canopy_center[0]
+            dz = cluster_z - canopy_center[2]
+            horizontal_dist = math.sqrt((dx / canopy_radii[0])**2 + (dz / canopy_radii[2])**2)
+            edge_factor = max(0.0, min(1.0, horizontal_dist))
+            droop_amount = (edge_factor ** 1.8) * trunk_height * 0.12
+            cluster_y -= droop_amount
 
             # Find nearest branch tip for attachment
             if self.tip_indices:
@@ -833,49 +871,73 @@ class HolographicTree:
             branch = self.branches[nearest_idx]
             zf = (branch.z_depth + 1) / 2
 
-            # Green color with variation (not cyan)
+            # Green color with subtle variation
             base_color = (
-                0.35 + zf * 0.15,  # R: subtle warmth
-                0.65 + zf * 0.2,   # G: dominant green
-                0.25 + zf * 0.15,  # B: less blue
+                0.35 + zf * 0.10,  # R: subtle warmth
+                0.68 + zf * 0.15,  # G: dominant green
+                0.28 + zf * 0.10,  # B: less blue
                 1.0                # A: opaque (alpha cutout handles transparency)
             )
 
-            # Create 3 small leaf cards per cluster at slightly different offsets
-            for card_idx in range(3):
+            # Cluster radius for spreading leaves within cluster
+            cluster_radius = trunk_height * 0.05
+
+            # Create 60-140 tiny leaf cards per cluster
+            leaves_per_cluster = random.randint(60, 140)
+            for card_idx in range(leaves_per_cluster):
                 atlas_index, uv_offset, uv_scale, color_variance, variance_amount = (
                     self._make_leaf_style(branch.variation_seed + cluster_idx * 3.17 + card_idx * 1.23)
                 )
 
-                # Small offset within cluster
-                card_offset_x = cluster_x - branch.end_x + random.uniform(-4.0, 4.0)
-                card_offset_y = cluster_y - branch.end_y + random.uniform(-4.0, 4.0)
-                card_offset_z = cluster_z - branch.end_z + random.uniform(-3.0, 3.0)
+                # Random offset within cluster sphere
+                leaf_theta = random.uniform(0.0, math.tau)
+                leaf_phi = math.acos(random.uniform(-1.0, 1.0))
+                leaf_r = random.uniform(0.0, cluster_radius)
+                leaf_offset_x = leaf_r * math.sin(leaf_phi) * math.cos(leaf_theta)
+                leaf_offset_y = leaf_r * math.sin(leaf_phi) * math.sin(leaf_theta)
+                leaf_offset_z = leaf_r * math.cos(leaf_phi)
 
-                # Random orientation
+                card_offset_x = cluster_x - branch.end_x + leaf_offset_x
+                card_offset_y = cluster_y - branch.end_y + leaf_offset_y
+                card_offset_z = cluster_z - branch.end_z + leaf_offset_z
+
+                # Random orientation: yaw 0..2pi, pitch/roll +-25 degrees
                 yaw = random.uniform(0.0, math.tau)
-                pitch = random.uniform(-0.3, 0.3)  # Slight tilt
-                roll = random.uniform(-0.2, 0.2)
+                pitch = random.uniform(-0.436, 0.436)  # +-25 degrees in radians
+                roll = random.uniform(-0.436, 0.436)
 
                 # Build rotation axes
                 right = (math.cos(yaw), math.sin(yaw), 0.0)
                 up = (-math.sin(yaw), math.cos(yaw), 0.0)
                 normal = (0.0, 0.0, 1.0)
 
-                # Apply droop (leaves point slightly downward)
-                droop = math.radians(random.uniform(12.0, 28.0))
-                up = self._rotate_around_axis(up, right, droop)
-                normal = self._rotate_around_axis(normal, right, droop)
-
                 # Apply pitch rotation
                 up = self._rotate_around_axis(up, right, pitch)
                 normal = self._rotate_around_axis(normal, right, pitch)
 
-                # Smaller leaf size (reduced by ~50%)
-                size = random.uniform(4.0, 7.0) * (0.9 + zf * 0.2)
+                # Apply roll rotation (rotate around forward axis)
+                forward = self._normalize(self._cross(right, up))
+                up = self._rotate_around_axis(up, forward, roll)
+                normal = self._rotate_around_axis(normal, forward, roll)
 
-                axis_x = (right[0] * size, right[1] * size, right[2] * size)
-                axis_y = (up[0] * size, up[1] * size, up[2] * size)
+                # TINY leaf size (critical for realism)
+                # Each leaf card is 1-3% of trunk height
+                leaf_size = trunk_height * random.uniform(0.01, 0.03)
+
+                # Per-leaf color jitter (+-10% hue/value variation)
+                color_jitter_r = random.uniform(-0.10, 0.10)
+                color_jitter_g = random.uniform(-0.10, 0.10)
+                color_jitter_b = random.uniform(-0.10, 0.10)
+
+                jittered_color = (
+                    max(0.0, min(1.0, base_color[0] + color_jitter_r)),
+                    max(0.0, min(1.0, base_color[1] + color_jitter_g)),
+                    max(0.0, min(1.0, base_color[2] + color_jitter_b)),
+                    1.0
+                )
+
+                axis_x = (right[0] * leaf_size, right[1] * leaf_size, right[2] * leaf_size)
+                axis_y = (up[0] * leaf_size, up[1] * leaf_size, up[2] * leaf_size)
                 axis_z = self._normalize(normal)
 
                 self.canopy_leaves.append(CanopyLeaf(
@@ -884,13 +946,15 @@ class HolographicTree:
                     axis_x=axis_x,
                     axis_y=axis_y,
                     axis_z=axis_z,
-                    base_color=base_color,
+                    base_color=jittered_color,
                     atlas_index=atlas_index,
                     uv_offset=uv_offset,
                     uv_scale=uv_scale,
                     color_variance=color_variance,
                     variance_amount=variance_amount,
                 ))
+
+        print(f"Generated {len(self.canopy_leaves)} canopy leaves in {num_clusters} clusters")
 
     def update(self, dt: float):
         self.time += dt
@@ -1203,17 +1267,25 @@ class OpenGLRenderer:
         self.use_alpha_to_coverage = self.ctx.fbo.samples > 1 and self.alpha_to_coverage_flag is not None
 
         # Debug view mode: 0=final with fog, 1=albedo only, 2=normals only, 3=final no fog
-        self.debug_view_mode = 3  # Start in "final no fog" mode to see colors clearly
+        self.debug_view_mode = 0  # Final with fog for atmospheric depth
 
         # Camera positioned for photo-like framing (FOV 40 degrees)
         # Further back and lower to show full tree and ground
         self.camera_position = (tree.w * 0.5, tree.h * 0.5, 650.0)
         self.camera_target = (tree.w * 0.5, tree.h * 0.48, 0.0)
         self.camera_up = (0.0, 1.0, 0.0)
-        self.light_direction = (0.4, 0.8, 0.35)
-        self.light_color = (1.0, 0.98, 0.92)
+        # Directional sun: coming from upper-left-front
+        # Direction vector points FROM surface TO light (negated for shader)
+        # Raw direction: (-0.4, -1.0, -0.2) normalized
+        light_dir_raw = (-0.4, -1.0, -0.2)
+        length = math.sqrt(light_dir_raw[0]**2 + light_dir_raw[1]**2 + light_dir_raw[2]**2)
+        self.light_direction = (light_dir_raw[0]/length, light_dir_raw[1]/length, light_dir_raw[2]/length)
+        # Warm sunlight (slightly yellow)
+        self.light_color = (1.0, 0.96, 0.88)
+        # Sky blue fog color
         self.fog_color = (0.55, 0.68, 0.82)
-        self.fog_density = 0.0003  # Reduced from 0.0016 to make fog much more subtle
+        # Mild atmospheric fog for depth (not too heavy)
+        self.fog_density = 0.0008
 
         self.shadow_size = 2048
         self.shadow_map = self.ctx.depth_texture((self.shadow_size, self.shadow_size))
