@@ -183,10 +183,10 @@ class HolographicTree:
             for _ in range(random.randint(1, 3)):
                 self.attached_leaves.append(AttachedLeaf(
                     branch_index=idx,
-                    t=1.0,
+                    t=random.uniform(0.82, 1.0),
                     side=random.choice([-1, 1]),
                     size=random.uniform(6, 12),
-                    angle_offset=random.uniform(-25, 25)
+                    angle_offset=random.uniform(-12, 12)
                 ))
         self._reset_bird()
 
@@ -216,7 +216,13 @@ class HolographicTree:
         mid_color = (110, 235, 255, 190)
         highlight_color = (190, 255, 255, 210)
         outline_color = (200, 255, 255, 230)
+        shadow_color = (20, 90, 120, 140)
+        rim_color = (220, 255, 255, 240)
 
+        shadow_rect = body_rect.copy()
+        shadow_rect.center = (shadow_rect.centerx + int(size * 0.2),
+                              shadow_rect.centery + int(size * 0.25))
+        pygame.draw.ellipse(surf, shadow_color, shadow_rect)
         pygame.draw.ellipse(surf, base_color, body_rect)
         pygame.draw.polygon(surf, base_color, tip_points)
 
@@ -224,9 +230,14 @@ class HolographicTree:
         pygame.draw.ellipse(surf, mid_color, inner_rect)
 
         highlight_rect = inner_rect.inflate(-int(size * 0.4), -int(size * 0.4))
-        highlight_rect.center = (highlight_rect.centerx - int(size * 0.2),
-                                 highlight_rect.centery - int(size * 0.2))
+        highlight_rect.center = (highlight_rect.centerx - int(size * 0.25),
+                                 highlight_rect.centery - int(size * 0.25))
         pygame.draw.ellipse(surf, highlight_color, highlight_rect)
+        rim_rect = body_rect.inflate(-int(size * 0.1), -int(size * 0.1))
+        pygame.draw.ellipse(surf, rim_color, rim_rect, 1)
+        vein_color = (180, 255, 255, 160)
+        pygame.draw.line(surf, vein_color, (cx_l, body_rect.top + int(size * 0.2)),
+                         (cx_l, body_rect.bottom - int(size * 0.2)), 1)
 
         pygame.draw.ellipse(surf, outline_color, body_rect, 1)
         pygame.draw.polygon(surf, outline_color, tip_points, 1)
@@ -247,6 +258,37 @@ class HolographicTree:
         cos_a = math.cos(rad)
         sin_a = math.sin(rad)
         return (x * cos_a - y * sin_a, x * sin_a + y * cos_a)
+
+    @staticmethod
+    def _get_branch_point_and_angle(points: List[tuple], t: float) -> tuple[tuple[float, float], float]:
+        if len(points) < 2:
+            return (points[0] if points else (0.0, 0.0)), -90.0
+        t = max(0.0, min(1.0, t))
+        lengths = []
+        total = 0.0
+        for i in range(len(points) - 1):
+            seg_len = math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+            lengths.append(seg_len)
+            total += seg_len
+        if total <= 0:
+            p0, p1 = points[-2], points[-1]
+            angle = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
+            return p1, angle
+        target = total * t
+        acc = 0.0
+        for i, seg_len in enumerate(lengths):
+            if acc + seg_len >= target:
+                local_t = (target - acc) / seg_len if seg_len else 0.0
+                x0, y0 = points[i]
+                x1, y1 = points[i + 1]
+                x = x0 + (x1 - x0) * local_t
+                y = y0 + (y1 - y0) * local_t
+                angle = math.degrees(math.atan2(y1 - y0, x1 - x0))
+                return (x, y), angle
+            acc += seg_len
+        p0, p1 = points[-2], points[-1]
+        angle = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
+        return p1, angle
 
     def _reset_bird(self):
         self.bird.state = "approach"
@@ -549,8 +591,16 @@ class HolographicTree:
 
         # Tree glow (using thick antialiased lines)
         for b in self.sorted_branches:
-            glow_thick = int(b.thickness + 10)
+            zf = (b.z_depth + 1) / 2
+            depth_offset = int((1 - zf) * 6)
             points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
+            if depth_offset:
+                for i in range(len(points) - 1):
+                    self.draw_thick_aaline(screen, (0, int(30 * f), int(50 * f)),
+                                          points[i][0] + depth_offset, points[i][1] + depth_offset,
+                                          points[i + 1][0] + depth_offset, points[i + 1][1] + depth_offset,
+                                          int(b.thickness + 12))
+            glow_thick = int(b.thickness + 10)
             for i in range(len(points) - 1):
                 self.draw_thick_aaline(screen, (0, int(80 * f), int(120 * f)),
                                       points[i][0], points[i][1], points[i + 1][0], points[i + 1][1],
@@ -573,7 +623,11 @@ class HolographicTree:
             # Draw thick antialiased branch
             points = b.segment_points or [(b.start_x, b.start_y), (b.end_x, b.end_y)]
             for i in range(len(points) - 1):
-                shadow_offset = 2 + int((1 - zf) * 2)
+                shadow_offset = 2 + int((1 - zf) * 3)
+                back_offset = 3 + int((1 - zf) * 5)
+                self.draw_thick_aaline(screen, (0, int(25 * f), int(35 * f)),
+                                      points[i][0] + back_offset, points[i][1] + back_offset,
+                                      points[i + 1][0] + back_offset, points[i + 1][1] + back_offset, th + 6)
                 self.draw_thick_aaline(screen, (0, int(40 * f), int(60 * f)),
                                       points[i][0] + shadow_offset, points[i][1] + shadow_offset,
                                       points[i + 1][0] + shadow_offset, points[i + 1][1] + shadow_offset, th + 2)
@@ -598,39 +652,62 @@ class HolographicTree:
                 continue
             branch = self.branches[leaf.branch_index]
             points = branch.segment_points or [(branch.start_x, branch.start_y), (branch.end_x, branch.end_y)]
-            if len(points) < 2:
+            if not points:
                 continue
-            start_x, start_y = points[-2]
-            end_x, end_y = points[-1]
-            dx = end_x - start_x
-            dy = end_y - start_y
-            length = math.hypot(dx, dy)
-            if length == 0:
-                continue
-            angle = math.degrees(math.atan2(dy, dx)) + leaf.angle_offset
+            (attach_x, attach_y), tangent_angle = self._get_branch_point_and_angle(points, leaf.t)
+            angle = tangent_angle + 180 + leaf.angle_offset + leaf.side * 6
             a = 0.7 * f
             size = int(leaf.size * (0.7 + (branch.z_depth + 1) * 0.15))
             size = max(4, size)
+            zf = (branch.z_depth + 1) / 2
+            shadow_offset = 2 + int((1 - zf) * 3)
 
             leaf_surf, base_offset = self._get_leaf_surface(size)
             rotated = pygame.transform.rotate(leaf_surf, -angle)
             base_rot = self._rotate_point(base_offset[0], base_offset[1], -angle)
-            x = end_x - base_rot[0]
-            y = end_y - base_rot[1]
+            x = attach_x - base_rot[0]
+            y = attach_y - base_rot[1]
             rect = rotated.get_rect(center=(int(x), int(y)))
+            shadow = rotated.copy()
+            shadow.fill((30, 90, 120, 140), special_flags=pygame.BLEND_RGBA_MULT)
+            shadow_rect = shadow.get_rect(center=(int(x + shadow_offset), int(y + shadow_offset)))
+            shadow.set_alpha(int(200 * a))
+            screen.blit(shadow, shadow_rect, special_flags=pygame.BLEND_ALPHA_SDL2)
+
             rotated.set_alpha(int(255 * a))
             screen.blit(rotated, rect, special_flags=pygame.BLEND_ADD)
+
+            highlight = rotated.copy()
+            highlight.fill((220, 255, 255, 200), special_flags=pygame.BLEND_RGBA_MULT)
+            highlight_rect = highlight.get_rect(center=(int(x - 1), int(y - 1)))
+            highlight.set_alpha(int(120 * a))
+            screen.blit(highlight, highlight_rect, special_flags=pygame.BLEND_ADD)
 
         # Leaves
         for lf in self.falling_leaves:
             sz = int(lf.size * (0.8 + (lf.z + 1) * 0.2))
             a = lf.alpha * f
+            zf = (lf.z + 1) / 2
+            shadow_offset = 2 + int((1 - zf) * 4)
 
             leaf_surf, _ = self._get_leaf_surface(sz)
             rotated = pygame.transform.rotate(leaf_surf, -lf.rotation)
-            rotated.set_alpha(int(255 * a))
             rect = rotated.get_rect(center=(int(lf.x), int(lf.y)))
+
+            shadow = rotated.copy()
+            shadow.fill((20, 80, 120, 140), special_flags=pygame.BLEND_RGBA_MULT)
+            shadow_rect = shadow.get_rect(center=(int(lf.x + shadow_offset), int(lf.y + shadow_offset)))
+            shadow.set_alpha(int(200 * a))
+            screen.blit(shadow, shadow_rect, special_flags=pygame.BLEND_ALPHA_SDL2)
+
+            rotated.set_alpha(int(255 * a))
             screen.blit(rotated, rect, special_flags=pygame.BLEND_ADD)
+
+            highlight = rotated.copy()
+            highlight.fill((220, 255, 255, 200), special_flags=pygame.BLEND_RGBA_MULT)
+            highlight_rect = highlight.get_rect(center=(int(lf.x - 1), int(lf.y - 1)))
+            highlight.set_alpha(int(110 * a))
+            screen.blit(highlight, highlight_rect, special_flags=pygame.BLEND_ADD)
 
         self._draw_bird(screen)
 
