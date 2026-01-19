@@ -1354,7 +1354,7 @@ class OpenGLRenderer:
         return data
 
     @staticmethod
-    def _build_grass_blades(area_size: float = 2000.0, num_blades: int = 50000, seed: int = 42) -> List[float]:
+    def _build_grass_blades(area_size: float = 2000.0, num_blades: int = 50000, seed: int = 42, center_x: float = 0.0) -> List[float]:
         """Generate individual grass blades with varying heights, widths, and positions.
 
         Each blade is a thin quad (2 triangles, 6 vertices).
@@ -1365,8 +1365,8 @@ class OpenGLRenderer:
         data: List[float] = []
 
         for _ in range(num_blades):
-            # Random position within area (centered at origin)
-            x = random.uniform(-area_size / 2, area_size / 2)
+            # Random position within area (centered at center_x, 0)
+            x = random.uniform(-area_size / 2, area_size / 2) + center_x
             z = random.uniform(-area_size / 2, area_size / 2)
 
             # Random blade properties
@@ -2402,8 +2402,8 @@ class OpenGLRenderer:
         self.cylinder_vbo = self.ctx.buffer(data=array('f', cylinder))
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
-        # Generate millions of individual grass blades instead of a single quad
-        grass_blades = self._build_grass_blades(area_size=2000.0, num_blades=2000000)
+        # Generate millions of individual grass blades centered around tree root
+        grass_blades = self._build_grass_blades(area_size=2000.0, num_blades=2000000, center_x=tree.root_x)
         self.ground_vbo = self.ctx.buffer(data=array('f', grass_blades))
         self.grass_blade_count = len(grass_blades) // 8  # 8 floats per vertex (3 pos + 3 normal + 2 uv)
 
