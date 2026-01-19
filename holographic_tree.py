@@ -2422,9 +2422,8 @@ class OpenGLRenderer:
         self.ground_shadow_program = self.ctx.program(
             vertex_shader="""
                 #version 330
-                // Per-vertex attributes (base mesh)
+                // Per-vertex attributes (base mesh) - only need pos and uv
                 in vec3 in_pos;
-                in vec3 in_normal;
                 in vec2 in_uv;
 
                 // Per-instance attributes
@@ -2687,7 +2686,7 @@ class OpenGLRenderer:
             patch['shadow_vao'] = self.ctx.vertex_array(
                 self.ground_shadow_program,
                 [
-                    (self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv"),
+                    (self.ground_vbo, "3f 3x 2f", "in_pos", "in_uv"),
                     (patch['vbo'], "2f f f f 2f /i",
                      "in_position_xz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
                 ],
