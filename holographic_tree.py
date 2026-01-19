@@ -1500,6 +1500,85 @@ class OpenGLRenderer:
         return data
 
     @staticmethod
+    def _terrain_height(x: float, z: float, seed: int = 42) -> float:
+        """Calculate terrain height at given world position using RDR2-style noise.
+
+        Uses multiple octaves of noise for natural rolling hills:
+        - Large scale: rolling hills (amplitude ~80 units)
+        - Medium scale: terrain variation (amplitude ~30 units)
+        - Small scale: subtle ground detail (amplitude ~5 units)
+        """
+        # Convert to numpy for fast noise calculation
+        x_arr = np.array([x], dtype=np.float32)
+        z_arr = np.array([z], dtype=np.float32)
+
+        # Large rolling hills (low frequency, high amplitude)
+        hills = _fbm_noise(x_arr * 0.0008, z_arr * 0.0008, octaves=3, persistence=0.5, scale=1.0, seed=seed)[0]
+        hills = (hills - 0.5) * 160.0  # Range: -80 to +80
+
+        # Medium terrain features
+        terrain = _fbm_noise(x_arr * 0.003, z_arr * 0.003, octaves=4, persistence=0.5, scale=1.0, seed=seed + 100)[0]
+        terrain = (terrain - 0.5) * 60.0  # Range: -30 to +30
+
+        # Small ground detail
+        detail = _fbm_noise(x_arr * 0.02, z_arr * 0.02, octaves=3, persistence=0.4, scale=1.0, seed=seed + 200)[0]
+        detail = (detail - 0.5) * 10.0  # Range: -5 to +5
+
+        return hills + terrain + detail
+
+    @staticmethod
+    def _terrain_normal(x: float, z: float, seed: int = 42, sample_dist: float = 2.0):
+        """Calculate terrain normal at given position using finite differences."""
+        # Sample height at center and neighbors
+        h_c = OpenGLRenderer._terrain_height(x, z, seed)
+        h_r = OpenGLRenderer._terrain_height(x + sample_dist, z, seed)
+        h_l = OpenGLRenderer._terrain_height(x - sample_dist, z, seed)
+        h_u = OpenGLRenderer._terrain_height(x, z + sample_dist, seed)
+        h_d = OpenGLRenderer._terrain_height(x, z - sample_dist, seed)
+
+        # Calculate tangent vectors
+        dx = (h_r - h_l) / (2.0 * sample_dist)
+        dz = (h_u - h_d) / (2.0 * sample_dist)
+
+        # Normal is cross product of tangents
+        # Tangent along X: (1, dx, 0)
+        # Tangent along Z: (0, dz, 1)
+        # Normal: cross product = (-dx, 1, -dz)
+        nx = -dx
+        ny = 1.0
+        nz = -dz
+
+        # Normalize
+        length = math.sqrt(nx*nx + ny*ny + nz*nz)
+        if length > 0:
+            return (nx/length, ny/length, nz/length)
+        return (0.0, 1.0, 0.0)
+
+    @staticmethod
+    def _should_have_grass(x: float, z: float, seed: int = 42) -> float:
+        """Determine grass density at location (0.0 = no grass/dirt, 1.0 = full grass).
+
+        Creates RDR2-style dirt patches, paths, and natural grass variation.
+        """
+        # Use noise to create natural dirt patches
+        x_arr = np.array([x], dtype=np.float32)
+        z_arr = np.array([z], dtype=np.float32)
+
+        # Large dirt patches (low frequency)
+        dirt_patches = _fbm_noise(x_arr * 0.002, z_arr * 0.002, octaves=3, persistence=0.6, scale=1.0, seed=seed + 300)[0]
+        # Bias toward grass (80% grass coverage overall)
+        dirt_patches = (dirt_patches - 0.2) * 1.5
+        dirt_patches = np.clip(dirt_patches, 0.0, 1.0)
+
+        # Medium variation (grass density variation)
+        variation = _fbm_noise(x_arr * 0.008, z_arr * 0.008, octaves=4, persistence=0.5, scale=1.0, seed=seed + 400)[0]
+
+        # Combine: dirt patches reduce grass, variation modulates density
+        grass_density = dirt_patches * (0.3 + 0.7 * variation)
+
+        return float(grass_density)
+
+    @staticmethod
     def _build_grass_blade_mesh() -> List[float]:
         """Create a single grass blade mesh (base geometry for instancing).
 
@@ -1539,11 +1618,11 @@ class OpenGLRenderer:
 
     @staticmethod
     def _build_grass_instance_data_patches(area_size: float = 2000.0, num_blades: int = 500000, seed: int = 42, center_x: float = 0.0, grid_size: int = 20):
-        """Generate instance data for grass blades organized into patches for frustum culling.
+        """Generate instance data for grass blades with RDR2-style terrain following.
 
         Returns a list of patches, where each patch contains:
         - bounds: (min_x, min_z, max_x, max_z)
-        - instance_data: List[float] with format position_xz (2f), rotation (1f), height (1f), width (1f), lean_xz (2f)
+        - instance_data: List[float] with format position_xyz (3f), rotation (1f), height (1f), width (1f), lean_xz (2f)
         - instance_count: number of instances in this patch
         """
         import random
@@ -1567,28 +1646,46 @@ class OpenGLRenderer:
                     'instance_data': [],
                 })
 
-        # Distribute grass blades across patches
+        # Distribute grass blades across patches with terrain following
         blades_per_patch = num_blades // (grid_size * grid_size)
+        attempts_per_patch = int(blades_per_patch * 2.5)  # Over-sample to account for density variation
+
         for patch in patches:
             min_x, min_z, max_x, max_z = patch['bounds']
-            for _ in range(blades_per_patch):
+            blades_placed = 0
+
+            for _ in range(attempts_per_patch):
+                if blades_placed >= blades_per_patch:
+                    break
+
                 # Random position within patch
                 x = random.uniform(min_x, max_x)
                 z = random.uniform(min_z, max_z)
 
-                # Random blade properties
-                height = random.uniform(8.0, 25.0)
+                # Check grass density (RDR2-style dirt patches)
+                grass_density = OpenGLRenderer._should_have_grass(x, z, seed)
+                if random.random() > grass_density:
+                    continue  # Skip this blade (dirt patch or sparse area)
+
+                # Sample terrain height
+                y = OpenGLRenderer._terrain_height(x, z, seed)
+
+                # Random blade properties (vary with terrain height for realism)
+                # Higher terrain = slightly shorter grass
+                height_factor = 1.0 - min(max(y, 0) / 150.0, 0.3)  # Reduce up to 30% on high terrain
+                height = random.uniform(8.0, 25.0) * height_factor
                 width = random.uniform(0.8, 2.5)
                 rotation = random.uniform(0, math.tau)
 
-                # Slight bend/lean
+                # Slight bend/lean (influenced by slope for realism)
                 lean_x = random.uniform(-0.15, 0.15)
                 lean_z = random.uniform(-0.15, 0.15)
 
-                # Instance data
-                patch['instance_data'].extend([x, z, rotation, height, width, lean_x, lean_z])
+                # Instance data: position_xyz, rotation, height, width, lean_xz
+                patch['instance_data'].extend([x, y, z, rotation, height, width, lean_x, lean_z])
+                blades_placed += 1
 
-            patch['instance_count'] = len(patch['instance_data']) // 7
+            patch['instance_count'] = len(patch['instance_data']) // 8  # 8 floats per instance now
 
         return patches
 
@@ -2104,11 +2201,11 @@ class OpenGLRenderer:
                 in vec2 in_uv;
 
                 // Per-instance attributes
-                in vec2 in_position_xz;  // World position (x, z)
-                in float in_rotation;     // Rotation around Y axis
-                in float in_height;       // Blade height
-                in float in_width;        // Blade width
-                in vec2 in_lean_xz;       // Lean direction
+                in vec3 in_position_xyz;  // World position (x, y, z) on terrain
+                in float in_rotation;      // Rotation around Y axis
+                in float in_height;        // Blade height
+                in float in_width;         // Blade width
+                in vec2 in_lean_xz;        // Lean direction
 
                 uniform mat4 u_view;
                 uniform mat4 u_proj;
@@ -2139,8 +2236,8 @@ class OpenGLRenderer:
                         local_pos.x * sin_rot + local_pos.z * cos_rot
                     );
 
-                    // Translate to world position
-                    vec3 world_pos = rotated_pos + vec3(in_position_xz.x, 0.0, in_position_xz.y);
+                    // Translate to world position (now includes terrain height)
+                    vec3 world_pos = rotated_pos + in_position_xyz;
 
                     // Transform normal
                     vec3 rotated_normal = vec3(
@@ -2430,7 +2527,7 @@ class OpenGLRenderer:
                 in vec2 in_uv;
 
                 // Per-instance attributes
-                in vec2 in_position_xz;
+                in vec3 in_position_xyz;
                 in float in_rotation;
                 in float in_height;
                 in float in_width;
@@ -2458,8 +2555,8 @@ class OpenGLRenderer:
                         local_pos.x * sin_rot + local_pos.z * cos_rot
                     );
 
-                    // Translate to world position
-                    vec3 world_pos = rotated_pos + vec3(in_position_xz.x, 0.0, in_position_xz.y);
+                    // Translate to world position (includes terrain height)
+                    vec3 world_pos = rotated_pos + in_position_xyz;
 
                     gl_Position = u_light_space * vec4(world_pos, 1.0);
                 }
@@ -2682,16 +2779,16 @@ class OpenGLRenderer:
                 self.ground_program,
                 [
                     (self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv"),
-                    (patch['vbo'], "2f f f f 2f /i",
-                     "in_position_xz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
+                    (patch['vbo'], "3f f f f 2f /i",
+                     "in_position_xyz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
                 ],
             )
             patch['shadow_vao'] = self.ctx.vertex_array(
                 self.ground_shadow_program,
                 [
                     (self.ground_vbo, "3f 3x 2f", "in_pos", "in_uv"),
-                    (patch['vbo'], "2f f f f 2f /i",
-                     "in_position_xz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
+                    (patch['vbo'], "3f f f f 2f /i",
+                     "in_position_xyz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
                 ],
             )
 
