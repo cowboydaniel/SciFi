@@ -1449,6 +1449,74 @@ class OpenGLRenderer:
 
         return data
 
+    @staticmethod
+    def _build_grass_blade_mesh() -> List[float]:
+        """Create a single grass blade mesh (base geometry for instancing).
+
+        Returns a thin quad (2 triangles, 6 vertices).
+        Vertex format: position (3f), normal (3f), uv (2f)
+        Position is in local space: bottom at y=0, top at y=1, centered at x=0
+        """
+        data: List[float] = []
+
+        # Base blade properties (will be scaled by instance data)
+        half_width = 0.5
+        height = 1.0
+
+        # Local space vertices (Y-up, centered at origin)
+        # Bottom left, bottom right, top left, top right
+        local_verts = [
+            (-half_width, 0.0, 0.0),      # Bottom left
+            (half_width, 0.0, 0.0),       # Bottom right
+            (-half_width, height, 0.0),   # Top left
+            (half_width, height, 0.0),    # Top right
+        ]
+
+        # Normal points in +Z direction (will be rotated by instance)
+        nx, ny, nz = 0.0, 0.0, 1.0
+
+        # Triangle 1: bottom-left, bottom-right, top-left
+        data.extend(local_verts[0]); data.extend([nx, ny, nz]); data.extend([0.0, 0.0])
+        data.extend(local_verts[1]); data.extend([nx, ny, nz]); data.extend([1.0, 0.0])
+        data.extend(local_verts[2]); data.extend([nx, ny, nz]); data.extend([0.0, 1.0])
+
+        # Triangle 2: bottom-right, top-right, top-left
+        data.extend(local_verts[1]); data.extend([nx, ny, nz]); data.extend([1.0, 0.0])
+        data.extend(local_verts[3]); data.extend([nx, ny, nz]); data.extend([1.0, 1.0])
+        data.extend(local_verts[2]); data.extend([nx, ny, nz]); data.extend([0.0, 1.0])
+
+        return data
+
+    @staticmethod
+    def _build_grass_instance_data(area_size: float = 2000.0, num_blades: int = 500000, seed: int = 42, center_x: float = 0.0) -> List[float]:
+        """Generate instance data for grass blades.
+
+        Instance format: position_xz (2f), rotation (1f), height (1f), width (1f), lean_xz (2f)
+        Total: 7 floats per instance
+        """
+        import random
+        random.seed(seed)
+        data: List[float] = []
+
+        for _ in range(num_blades):
+            # Random position within area
+            x = random.uniform(-area_size / 2, area_size / 2) + center_x
+            z = random.uniform(-area_size / 2, area_size / 2)
+
+            # Random blade properties
+            height = random.uniform(8.0, 25.0)
+            width = random.uniform(0.8, 2.5)
+            rotation = random.uniform(0, math.tau)  # Rotation around Y axis
+
+            # Slight bend/lean
+            lean_x = random.uniform(-0.15, 0.15)
+            lean_z = random.uniform(-0.15, 0.15)
+
+            # Instance data: position_xz, rotation, height, width, lean_xz
+            data.extend([x, z, rotation, height, width, lean_x, lean_z])
+
+        return data
+
     def __init__(self, window: pyglet.window.Window, tree: HolographicTree):
         self.window = window
         self.tree = tree
@@ -1953,9 +2021,17 @@ class OpenGLRenderer:
         self.ground_program = self.ctx.program(
             vertex_shader="""
                 #version 330
+                // Per-vertex attributes (base mesh)
                 in vec3 in_pos;
                 in vec3 in_normal;
                 in vec2 in_uv;
+
+                // Per-instance attributes
+                in vec2 in_position_xz;  // World position (x, z)
+                in float in_rotation;     // Rotation around Y axis
+                in float in_height;       // Blade height
+                in float in_width;        // Blade width
+                in vec2 in_lean_xz;       // Lean direction
 
                 uniform mat4 u_view;
                 uniform mat4 u_proj;
@@ -1967,12 +2043,40 @@ class OpenGLRenderer:
                 out vec4 v_light_space_pos;
 
                 void main() {
-                    vec4 world = vec4(in_pos, 1.0);
-                    gl_Position = u_proj * u_view * world;
-                    v_world_pos = world.xyz;
-                    v_normal = normalize(in_normal);
+                    // Scale blade by width and height
+                    vec3 local_pos = in_pos;
+                    local_pos.x *= in_width;
+                    local_pos.y *= in_height;
+
+                    // Add lean (top vertices lean more)
+                    float lean_factor = in_uv.y; // 0 at bottom, 1 at top
+                    local_pos.x += in_lean_xz.x * lean_factor * in_height;
+                    local_pos.z += in_lean_xz.y * lean_factor * in_height;
+
+                    // Rotate around Y axis
+                    float cos_rot = cos(in_rotation);
+                    float sin_rot = sin(in_rotation);
+                    vec3 rotated_pos = vec3(
+                        local_pos.x * cos_rot - local_pos.z * sin_rot,
+                        local_pos.y,
+                        local_pos.x * sin_rot + local_pos.z * cos_rot
+                    );
+
+                    // Translate to world position
+                    vec3 world_pos = rotated_pos + vec3(in_position_xz.x, 0.0, in_position_xz.y);
+
+                    // Transform normal
+                    vec3 rotated_normal = vec3(
+                        in_normal.x * cos_rot - in_normal.z * sin_rot,
+                        in_normal.y,
+                        in_normal.x * sin_rot + in_normal.z * cos_rot
+                    );
+
+                    gl_Position = u_proj * u_view * vec4(world_pos, 1.0);
+                    v_world_pos = world_pos;
+                    v_normal = normalize(rotated_normal);
                     v_uv = in_uv;
-                    v_light_space_pos = u_light_space * world;
+                    v_light_space_pos = u_light_space * vec4(world_pos, 1.0);
                 }
             """,
             fragment_shader="""
@@ -2243,13 +2347,44 @@ class OpenGLRenderer:
         self.ground_shadow_program = self.ctx.program(
             vertex_shader="""
                 #version 330
+                // Per-vertex attributes (base mesh)
                 in vec3 in_pos;
                 in vec3 in_normal;
                 in vec2 in_uv;
+
+                // Per-instance attributes
+                in vec2 in_position_xz;
+                in float in_rotation;
+                in float in_height;
+                in float in_width;
+                in vec2 in_lean_xz;
+
                 uniform mat4 u_light_space;
 
                 void main() {
-                    gl_Position = u_light_space * vec4(in_pos, 1.0);
+                    // Scale blade by width and height
+                    vec3 local_pos = in_pos;
+                    local_pos.x *= in_width;
+                    local_pos.y *= in_height;
+
+                    // Add lean
+                    float lean_factor = in_uv.y;
+                    local_pos.x += in_lean_xz.x * lean_factor * in_height;
+                    local_pos.z += in_lean_xz.y * lean_factor * in_height;
+
+                    // Rotate around Y axis
+                    float cos_rot = cos(in_rotation);
+                    float sin_rot = sin(in_rotation);
+                    vec3 rotated_pos = vec3(
+                        local_pos.x * cos_rot - local_pos.z * sin_rot,
+                        local_pos.y,
+                        local_pos.x * sin_rot + local_pos.z * cos_rot
+                    );
+
+                    // Translate to world position
+                    vec3 world_pos = rotated_pos + vec3(in_position_xz.x, 0.0, in_position_xz.y);
+
+                    gl_Position = u_light_space * vec4(world_pos, 1.0);
                 }
             """,
             fragment_shader="""
@@ -2402,10 +2537,12 @@ class OpenGLRenderer:
         self.cylinder_vbo = self.ctx.buffer(data=array('f', cylinder))
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
-        # Generate millions of individual grass blades centered around tree root
-        grass_blades = self._build_grass_blades(area_size=2000.0, num_blades=2000000, center_x=tree.root_x)
-        self.ground_vbo = self.ctx.buffer(data=array('f', grass_blades))
-        self.grass_blade_count = len(grass_blades) // 8  # 8 floats per vertex (3 pos + 3 normal + 2 uv)
+        # Generate grass using instancing: one base mesh + many instances
+        grass_blade_mesh = self._build_grass_blade_mesh()
+        grass_instance_data = self._build_grass_instance_data(area_size=2000.0, num_blades=500000, center_x=tree.root_x)
+        self.ground_vbo = self.ctx.buffer(data=array('f', grass_blade_mesh))
+        self.ground_instance_vbo = self.ctx.buffer(data=array('f', grass_instance_data))
+        self.grass_instance_count = len(grass_instance_data) // 7  # 7 floats per instance
 
         self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 96)
         self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 128)
@@ -2445,7 +2582,11 @@ class OpenGLRenderer:
 
         self.ground_vao = self.ctx.vertex_array(
             self.ground_program,
-            [(self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv")],
+            [
+                (self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv"),
+                (self.ground_instance_vbo, "2f f f f 2f /i",
+                 "in_position_xz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
+            ],
         )
 
         self.sky_vao = self.ctx.vertex_array(
@@ -2475,7 +2616,11 @@ class OpenGLRenderer:
 
         self.ground_shadow_vao = self.ctx.vertex_array(
             self.ground_shadow_program,
-            [(self.ground_vbo, "3f 20x", "in_pos")],
+            [
+                (self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv"),
+                (self.ground_instance_vbo, "2f f f f 2f /i",
+                 "in_position_xz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
+            ],
         )
 
         self.bird_vao = self.ctx.vertex_array(
@@ -2589,7 +2734,7 @@ class OpenGLRenderer:
             self.leaf_shadow_program["u_leaf_atlas"].value = 0
             self.leaf_shadow_vao.render(instances=self.leaf_count)
         self.ground_shadow_program["u_light_space"].write(light_space)
-        self.ground_shadow_vao.render()
+        self.ground_shadow_vao.render(instances=self.grass_instance_count)
 
         self.ctx.screen.use()
         self.ctx.viewport = (0, 0, width, height)
@@ -2620,7 +2765,7 @@ class OpenGLRenderer:
         self.ground_program["u_tree_center"].value = (self.tree.root_x, self.tree.root_y)
         self.ground_program["u_debug_view"].value = self.debug_view_mode
         self.ground_program["u_time"].value = self.tree.time
-        self.ground_vao.render()
+        self.ground_vao.render(instances=self.grass_instance_count)
 
         if branch_instances:
             self.branch_program["u_view"].write(view)
