@@ -1623,11 +1623,11 @@ class OpenGLRenderer:
         # Minimal fog - basically non-existent
         self.fog_density = 0.0001
 
-        self.shadow_size = 2048
+        self.shadow_size = 1024  # Reduced from 2048 for better performance
         try:
             self.shadow_map = self.ctx.depth_texture((self.shadow_size, self.shadow_size))
         except Exception:
-            self.shadow_size = 1024
+            self.shadow_size = 512
             self.shadow_map = self.ctx.depth_texture((self.shadow_size, self.shadow_size))
         self.shadow_map.repeat_x = False
         self.shadow_map.repeat_y = False
@@ -1755,14 +1755,15 @@ class OpenGLRenderer:
                     float bias = max(0.0025 * slope, 0.0006);
                     float current = proj.z - bias;
                     float shadow = 0.0;
-                    for (int x = -1; x <= 1; x++) {
-                        for (int y = -1; y <= 1; y++) {
+                    // Reduced from 3x3 to 2x2 for performance (9 samples -> 4 samples)
+                    for (int x = 0; x <= 1; x++) {
+                        for (int y = 0; y <= 1; y++) {
                             vec2 offset = vec2(x, y) * u_shadow_texel;
                             float depth = texture(u_shadow_map, proj.xy + offset).r;
                             shadow += current <= depth ? 1.0 : 0.0;
                         }
                     }
-                    return shadow / 9.0;
+                    return shadow / 4.0;
                 }
 
                 void main() {
@@ -1996,14 +1997,15 @@ class OpenGLRenderer:
                     float bias = max(0.0025 * slope, 0.0006);
                     float current = proj.z - bias;
                     float shadow = 0.0;
-                    for (int x = -1; x <= 1; x++) {
-                        for (int y = -1; y <= 1; y++) {
+                    // Reduced from 3x3 to 2x2 for performance (9 samples -> 4 samples)
+                    for (int x = 0; x <= 1; x++) {
+                        for (int y = 0; y <= 1; y++) {
                             vec2 offset = vec2(x, y) * u_shadow_texel;
                             float depth = texture(u_shadow_map, proj.xy + offset).r;
                             shadow += current <= depth ? 1.0 : 0.0;
                         }
                     }
-                    return shadow / 9.0;
+                    return shadow / 4.0;
                 }
 
                 void main() {
@@ -2189,14 +2191,15 @@ class OpenGLRenderer:
                     float bias = max(0.0025 * slope, 0.0006);
                     float current = proj.z - bias;
                     float shadow = 0.0;
-                    for (int x = -1; x <= 1; x++) {
-                        for (int y = -1; y <= 1; y++) {
+                    // Reduced from 3x3 to 2x2 for performance (9 samples -> 4 samples)
+                    for (int x = 0; x <= 1; x++) {
+                        for (int y = 0; y <= 1; y++) {
                             vec2 offset = vec2(x, y) * u_shadow_texel;
                             float depth = texture(u_shadow_map, proj.xy + offset).r;
                             shadow += current <= depth ? 1.0 : 0.0;
                         }
                     }
-                    return shadow / 9.0;
+                    return shadow / 4.0;
                 }
 
                 // Hash function for pseudo-random values
@@ -2618,7 +2621,7 @@ class OpenGLRenderer:
         # Create patches for frustum culling (20x20 grid = 400 patches)
         grass_patches = self._build_grass_instance_data_patches(
             area_size=2000.0,
-            num_blades=500000,
+            num_blades=200000,  # Reduced from 500K for better performance
             center_x=tree.root_x,
             grid_size=20
         )
@@ -2832,12 +2835,12 @@ class OpenGLRenderer:
             self.leaf_atlas.use(location=0)
             self.leaf_shadow_program["u_leaf_atlas"].value = 0
             self.leaf_shadow_vao.render(instances=self.leaf_count)
-        # Render grass shadows with frustum culling
-        self.ground_shadow_program["u_light_space"].write(light_space)
-        for patch in self.grass_patches:
-            min_x, min_z, max_x, max_z = patch['bounds']
-            if self._aabb_in_frustum(frustum_planes, min_x, min_z, max_x, max_z):
-                patch['shadow_vao'].render(instances=patch['instance_count'])
+        # Grass shadows disabled for performance (grass doesn't need to cast shadows)
+        # self.ground_shadow_program["u_light_space"].write(light_space)
+        # for patch in self.grass_patches:
+        #     min_x, min_z, max_x, max_z = patch['bounds']
+        #     if self._aabb_in_frustum(frustum_planes, min_x, min_z, max_x, max_z):
+        #         patch['shadow_vao'].render(instances=patch['instance_count'])
 
         self.ctx.screen.use()
         self.ctx.viewport = (0, 0, width, height)
