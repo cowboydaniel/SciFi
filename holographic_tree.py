@@ -2042,11 +2042,14 @@ class OpenGLRenderer:
                     // v_uv.x goes from 0 (left edge) to 1 (right edge)
                     // v_uv.y goes from 0 (bottom) to 1 (top)
 
-                    // Base grass color with variation
+                    // Sample grass texture for base color variation
+                    vec2 grass_tex_uv = v_world_pos.xz * 0.05;
+                    vec3 grass_tex = texture(u_grass_albedo, grass_tex_uv).rgb;
+
+                    // Base grass color with variation from texture
                     vec2 blade_uv = v_world_pos.xz * 0.05;
                     float color_var = noise(blade_uv * 15.0);
-                    vec3 grass_base = vec3(0.25, 0.45, 0.15);  // Base green
-                    grass_base = mix(grass_base * 0.85, grass_base * 1.15, color_var);
+                    vec3 grass_base = grass_tex * mix(0.85, 1.15, color_var);
 
                     // Blade shape: darker at edges, lighter in middle
                     float edge_falloff = 1.0 - abs(v_uv.x - 0.5) * 2.0;  // 0 at edges, 1 at center
@@ -2054,7 +2057,7 @@ class OpenGLRenderer:
 
                     // Height gradient: darker at base, lighter/yellower at tip
                     float height_gradient = v_uv.y;
-                    vec3 tip_color = vec3(0.45, 0.55, 0.25);  // Yellowish-green
+                    vec3 tip_color = grass_base * vec3(1.2, 1.15, 0.9);  // Yellowish tint at tips
                     vec3 base_color = grass_base * 0.7;  // Darker at base
                     vec3 blade_color = mix(base_color, tip_color, height_gradient);
 
@@ -2399,8 +2402,8 @@ class OpenGLRenderer:
         self.cylinder_vbo = self.ctx.buffer(data=array('f', cylinder))
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
-        # Generate individual grass blades instead of a single quad
-        grass_blades = self._build_grass_blades(area_size=2000.0, num_blades=50000)
+        # Generate millions of individual grass blades instead of a single quad
+        grass_blades = self._build_grass_blades(area_size=2000.0, num_blades=2000000)
         self.ground_vbo = self.ctx.buffer(data=array('f', grass_blades))
         self.grass_blade_count = len(grass_blades) // 8  # 8 floats per vertex (3 pos + 3 normal + 2 uv)
 
