@@ -1500,31 +1500,65 @@ class OpenGLRenderer:
         return data
 
     @staticmethod
-    def _terrain_height(x: float, z: float, seed: int = 42) -> float:
-        """Calculate terrain height at given world position using RDR2-style noise.
+    def _terrain_height_vectorized(x_arr: np.ndarray, z_arr: np.ndarray, seed: int = 42) -> np.ndarray:
+        """Calculate terrain height at given world positions (vectorized for speed).
 
         Uses multiple octaves of noise for natural rolling hills:
         - Large scale: rolling hills (amplitude ~80 units)
         - Medium scale: terrain variation (amplitude ~30 units)
         - Small scale: subtle ground detail (amplitude ~5 units)
-        """
-        # Convert to numpy for fast noise calculation
-        x_arr = np.array([x], dtype=np.float32)
-        z_arr = np.array([z], dtype=np.float32)
 
+        Args:
+            x_arr: numpy array of x positions
+            z_arr: numpy array of z positions
+            seed: random seed
+
+        Returns:
+            numpy array of heights at each position
+        """
         # Large rolling hills (low frequency, high amplitude)
-        hills = _fbm_noise(x_arr * 0.0008, z_arr * 0.0008, octaves=3, persistence=0.5, scale=1.0, seed=seed)[0]
+        hills = _fbm_noise(x_arr * 0.0008, z_arr * 0.0008, octaves=3, persistence=0.5, scale=1.0, seed=seed)
         hills = (hills - 0.5) * 160.0  # Range: -80 to +80
 
         # Medium terrain features
-        terrain = _fbm_noise(x_arr * 0.003, z_arr * 0.003, octaves=4, persistence=0.5, scale=1.0, seed=seed + 100)[0]
+        terrain = _fbm_noise(x_arr * 0.003, z_arr * 0.003, octaves=4, persistence=0.5, scale=1.0, seed=seed + 100)
         terrain = (terrain - 0.5) * 60.0  # Range: -30 to +30
 
         # Small ground detail
-        detail = _fbm_noise(x_arr * 0.02, z_arr * 0.02, octaves=3, persistence=0.4, scale=1.0, seed=seed + 200)[0]
+        detail = _fbm_noise(x_arr * 0.02, z_arr * 0.02, octaves=3, persistence=0.4, scale=1.0, seed=seed + 200)
         detail = (detail - 0.5) * 10.0  # Range: -5 to +5
 
         return hills + terrain + detail
+
+    @staticmethod
+    def _should_have_grass_vectorized(x_arr: np.ndarray, z_arr: np.ndarray, seed: int = 42) -> np.ndarray:
+        """Determine grass density at locations (vectorized).
+
+        Creates RDR2-style dirt patches, paths, and natural grass variation.
+
+        Returns:
+            numpy array of grass density values (0.0 = no grass/dirt, 1.0 = full grass)
+        """
+        # Large dirt patches (low frequency)
+        dirt_patches = _fbm_noise(x_arr * 0.002, z_arr * 0.002, octaves=3, persistence=0.6, scale=1.0, seed=seed + 300)
+        # Bias toward grass (80% grass coverage overall)
+        dirt_patches = (dirt_patches - 0.2) * 1.5
+        dirt_patches = np.clip(dirt_patches, 0.0, 1.0)
+
+        # Medium variation (grass density variation)
+        variation = _fbm_noise(x_arr * 0.008, z_arr * 0.008, octaves=4, persistence=0.5, scale=1.0, seed=seed + 400)
+
+        # Combine: dirt patches reduce grass, variation modulates density
+        grass_density = dirt_patches * (0.3 + 0.7 * variation)
+
+        return grass_density
+
+    @staticmethod
+    def _terrain_height(x: float, z: float, seed: int = 42) -> float:
+        """Calculate terrain height at given world position (single value wrapper)."""
+        x_arr = np.array([x], dtype=np.float32)
+        z_arr = np.array([z], dtype=np.float32)
+        return float(OpenGLRenderer._terrain_height_vectorized(x_arr, z_arr, seed)[0])
 
     @staticmethod
     def _terrain_normal(x: float, z: float, seed: int = 42, sample_dist: float = 2.0):
@@ -1554,29 +1588,6 @@ class OpenGLRenderer:
             return (nx/length, ny/length, nz/length)
         return (0.0, 1.0, 0.0)
 
-    @staticmethod
-    def _should_have_grass(x: float, z: float, seed: int = 42) -> float:
-        """Determine grass density at location (0.0 = no grass/dirt, 1.0 = full grass).
-
-        Creates RDR2-style dirt patches, paths, and natural grass variation.
-        """
-        # Use noise to create natural dirt patches
-        x_arr = np.array([x], dtype=np.float32)
-        z_arr = np.array([z], dtype=np.float32)
-
-        # Large dirt patches (low frequency)
-        dirt_patches = _fbm_noise(x_arr * 0.002, z_arr * 0.002, octaves=3, persistence=0.6, scale=1.0, seed=seed + 300)[0]
-        # Bias toward grass (80% grass coverage overall)
-        dirt_patches = (dirt_patches - 0.2) * 1.5
-        dirt_patches = np.clip(dirt_patches, 0.0, 1.0)
-
-        # Medium variation (grass density variation)
-        variation = _fbm_noise(x_arr * 0.008, z_arr * 0.008, octaves=4, persistence=0.5, scale=1.0, seed=seed + 400)[0]
-
-        # Combine: dirt patches reduce grass, variation modulates density
-        grass_density = dirt_patches * (0.3 + 0.7 * variation)
-
-        return float(grass_density)
 
     @staticmethod
     def _build_grass_blade_mesh() -> List[float]:
@@ -1618,15 +1629,16 @@ class OpenGLRenderer:
 
     @staticmethod
     def _build_grass_instance_data_patches(area_size: float = 2000.0, num_blades: int = 500000, seed: int = 42, center_x: float = 0.0, grid_size: int = 20):
-        """Generate instance data for grass blades with RDR2-style terrain following.
+        """Generate instance data for grass blades with RDR2-style terrain following (VECTORIZED).
 
         Returns a list of patches, where each patch contains:
         - bounds: (min_x, min_z, max_x, max_z)
         - instance_data: List[float] with format position_xyz (3f), rotation (1f), height (1f), width (1f), lean_xz (2f)
         - instance_count: number of instances in this patch
         """
-        import random
-        random.seed(seed)
+        np.random.seed(seed)
+
+        print(f"Generating terrain-following grass ({num_blades} blades)...")
 
         # Calculate patch dimensions
         patch_size = area_size / grid_size
@@ -1646,47 +1658,60 @@ class OpenGLRenderer:
                     'instance_data': [],
                 })
 
-        # Distribute grass blades across patches with terrain following
+        # VECTORIZED: Generate ALL grass positions at once per patch
         blades_per_patch = num_blades // (grid_size * grid_size)
-        attempts_per_patch = int(blades_per_patch * 2.5)  # Over-sample to account for density variation
+        attempts_per_patch = int(blades_per_patch * 1.5)  # Over-sample for rejection
 
-        for patch in patches:
+        for idx, patch in enumerate(patches):
             min_x, min_z, max_x, max_z = patch['bounds']
-            blades_placed = 0
 
-            for _ in range(attempts_per_patch):
-                if blades_placed >= blades_per_patch:
-                    break
+            # Generate candidate positions (vectorized)
+            x_positions = np.random.uniform(min_x, max_x, attempts_per_patch).astype(np.float32)
+            z_positions = np.random.uniform(min_z, max_z, attempts_per_patch).astype(np.float32)
 
-                # Random position within patch
-                x = random.uniform(min_x, max_x)
-                z = random.uniform(min_z, max_z)
+            # Evaluate grass density at all positions (vectorized)
+            grass_densities = OpenGLRenderer._should_have_grass_vectorized(x_positions, z_positions, seed)
+            random_samples = np.random.uniform(0, 1, attempts_per_patch).astype(np.float32)
 
-                # Check grass density (RDR2-style dirt patches)
-                grass_density = OpenGLRenderer._should_have_grass(x, z, seed)
-                if random.random() > grass_density:
-                    continue  # Skip this blade (dirt patch or sparse area)
+            # Filter positions based on grass density (rejection sampling)
+            accepted_mask = random_samples <= grass_densities
+            x_final = x_positions[accepted_mask][:blades_per_patch]
+            z_final = z_positions[accepted_mask][:blades_per_patch]
 
-                # Sample terrain height
-                y = OpenGLRenderer._terrain_height(x, z, seed)
+            # Get terrain heights for accepted positions (vectorized)
+            y_final = OpenGLRenderer._terrain_height_vectorized(x_final, z_final, seed)
 
-                # Random blade properties (vary with terrain height for realism)
-                # Higher terrain = slightly shorter grass
-                height_factor = 1.0 - min(max(y, 0) / 150.0, 0.3)  # Reduce up to 30% on high terrain
-                height = random.uniform(8.0, 25.0) * height_factor
-                width = random.uniform(0.8, 2.5)
-                rotation = random.uniform(0, math.tau)
+            n = len(x_final)
+            if n == 0:
+                patch['instance_count'] = 0
+                continue
 
-                # Slight bend/lean (influenced by slope for realism)
-                lean_x = random.uniform(-0.15, 0.15)
-                lean_z = random.uniform(-0.15, 0.15)
+            # Generate random properties (vectorized)
+            height_factors = 1.0 - np.minimum(np.maximum(y_final, 0) / 150.0, 0.3)
+            heights = np.random.uniform(8.0, 25.0, n).astype(np.float32) * height_factors
+            widths = np.random.uniform(0.8, 2.5, n).astype(np.float32)
+            rotations = np.random.uniform(0, math.tau, n).astype(np.float32)
+            lean_x = np.random.uniform(-0.15, 0.15, n).astype(np.float32)
+            lean_z = np.random.uniform(-0.15, 0.15, n).astype(np.float32)
 
-                # Instance data: position_xyz, rotation, height, width, lean_xz
-                patch['instance_data'].extend([x, y, z, rotation, height, width, lean_x, lean_z])
-                blades_placed += 1
+            # Build instance data (interleave arrays)
+            instance_data = np.empty(n * 8, dtype=np.float32)
+            instance_data[0::8] = x_final
+            instance_data[1::8] = y_final
+            instance_data[2::8] = z_final
+            instance_data[3::8] = rotations
+            instance_data[4::8] = heights
+            instance_data[5::8] = widths
+            instance_data[6::8] = lean_x
+            instance_data[7::8] = lean_z
 
-            patch['instance_count'] = len(patch['instance_data']) // 8  # 8 floats per instance now
+            patch['instance_data'] = instance_data.tolist()
+            patch['instance_count'] = n
 
+            if (idx + 1) % 100 == 0:
+                print(f"  Generated {idx + 1}/{len(patches)} patches...")
+
+        print(f"Terrain grass generation complete!")
         return patches
 
     def __init__(self, window: pyglet.window.Window, tree: HolographicTree):
