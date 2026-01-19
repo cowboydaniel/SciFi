@@ -2530,7 +2530,7 @@ class OpenGLRenderer:
         self.ground_program["u_fog_density"].value = self.fog_density
         self.ground_program["u_tree_center"].value = (self.tree.root_x, self.tree.root_y)
         self.ground_program["u_debug_view"].value = self.debug_view_mode
-        self.ground_program["u_time"].value = self.time
+        self.ground_program["u_time"].value = self.tree.time
         self.ground_vao.render()
 
         if branch_instances:
