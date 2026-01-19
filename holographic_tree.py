@@ -1300,6 +1300,56 @@ class OpenGLRenderer:
         )
 
     @staticmethod
+    def _extract_frustum_planes(view_proj_matrix: tuple[float, ...]):
+        """Extract 6 frustum planes from view-projection matrix.
+        Each plane is (a, b, c, d) where ax + by + cz + d = 0
+        Returns: [left, right, bottom, top, near, far]
+        """
+        m = view_proj_matrix
+        planes = []
+
+        # Left plane: m3 + m0
+        planes.append((m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12]))
+        # Right plane: m3 - m0
+        planes.append((m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12]))
+        # Bottom plane: m3 + m1
+        planes.append((m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13]))
+        # Top plane: m3 - m1
+        planes.append((m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13]))
+        # Near plane: m3 + m2
+        planes.append((m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]))
+        # Far plane: m3 - m2
+        planes.append((m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]))
+
+        # Normalize planes
+        normalized_planes = []
+        for a, b, c, d in planes:
+            length = math.sqrt(a * a + b * b + c * c)
+            if length > 0:
+                normalized_planes.append((a / length, b / length, c / length, d / length))
+            else:
+                normalized_planes.append((a, b, c, d))
+
+        return normalized_planes
+
+    @staticmethod
+    def _aabb_in_frustum(frustum_planes, min_x: float, min_z: float, max_x: float, max_z: float, min_y: float = 0.0, max_y: float = 25.0) -> bool:
+        """Test if axis-aligned bounding box intersects frustum.
+        Uses separating axis theorem - if AABB is completely outside any plane, it's culled.
+        """
+        for a, b, c, d in frustum_planes:
+            # Find the positive vertex (vertex furthest along plane normal)
+            px = max_x if a >= 0 else min_x
+            py = max_y if b >= 0 else min_y
+            pz = max_z if c >= 0 else min_z
+
+            # If positive vertex is outside plane, entire AABB is outside
+            if a * px + b * py + c * pz + d < 0:
+                return False
+
+        return True
+
+    @staticmethod
     def _ortho(left: float, right: float, bottom: float, top: float, near: float, far: float) -> tuple[float, ...]:
         rl = right - left
         tb = top - bottom
@@ -1488,34 +1538,59 @@ class OpenGLRenderer:
         return data
 
     @staticmethod
-    def _build_grass_instance_data(area_size: float = 2000.0, num_blades: int = 500000, seed: int = 42, center_x: float = 0.0) -> List[float]:
-        """Generate instance data for grass blades.
+    def _build_grass_instance_data_patches(area_size: float = 2000.0, num_blades: int = 500000, seed: int = 42, center_x: float = 0.0, grid_size: int = 20):
+        """Generate instance data for grass blades organized into patches for frustum culling.
 
-        Instance format: position_xz (2f), rotation (1f), height (1f), width (1f), lean_xz (2f)
-        Total: 7 floats per instance
+        Returns a list of patches, where each patch contains:
+        - bounds: (min_x, min_z, max_x, max_z)
+        - instance_data: List[float] with format position_xz (2f), rotation (1f), height (1f), width (1f), lean_xz (2f)
+        - instance_count: number of instances in this patch
         """
         import random
         random.seed(seed)
-        data: List[float] = []
 
-        for _ in range(num_blades):
-            # Random position within area
-            x = random.uniform(-area_size / 2, area_size / 2) + center_x
-            z = random.uniform(-area_size / 2, area_size / 2)
+        # Calculate patch dimensions
+        patch_size = area_size / grid_size
+        min_x = -area_size / 2 + center_x
+        min_z = -area_size / 2
 
-            # Random blade properties
-            height = random.uniform(8.0, 25.0)
-            width = random.uniform(0.8, 2.5)
-            rotation = random.uniform(0, math.tau)  # Rotation around Y axis
+        # Create patches with bounds
+        patches = []
+        for row in range(grid_size):
+            for col in range(grid_size):
+                patch_min_x = min_x + col * patch_size
+                patch_min_z = min_z + row * patch_size
+                patch_max_x = patch_min_x + patch_size
+                patch_max_z = patch_min_z + patch_size
+                patches.append({
+                    'bounds': (patch_min_x, patch_min_z, patch_max_x, patch_max_z),
+                    'instance_data': [],
+                })
 
-            # Slight bend/lean
-            lean_x = random.uniform(-0.15, 0.15)
-            lean_z = random.uniform(-0.15, 0.15)
+        # Distribute grass blades across patches
+        blades_per_patch = num_blades // (grid_size * grid_size)
+        for patch in patches:
+            min_x, min_z, max_x, max_z = patch['bounds']
+            for _ in range(blades_per_patch):
+                # Random position within patch
+                x = random.uniform(min_x, max_x)
+                z = random.uniform(min_z, max_z)
 
-            # Instance data: position_xz, rotation, height, width, lean_xz
-            data.extend([x, z, rotation, height, width, lean_x, lean_z])
+                # Random blade properties
+                height = random.uniform(8.0, 25.0)
+                width = random.uniform(0.8, 2.5)
+                rotation = random.uniform(0, math.tau)
 
-        return data
+                # Slight bend/lean
+                lean_x = random.uniform(-0.15, 0.15)
+                lean_z = random.uniform(-0.15, 0.15)
+
+                # Instance data
+                patch['instance_data'].extend([x, z, rotation, height, width, lean_x, lean_z])
+
+            patch['instance_count'] = len(patch['instance_data']) // 7
+
+        return patches
 
     def __init__(self, window: pyglet.window.Window, tree: HolographicTree):
         self.window = window
@@ -2537,12 +2612,31 @@ class OpenGLRenderer:
         self.cylinder_vbo = self.ctx.buffer(data=array('f', cylinder))
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
-        # Generate grass using instancing: one base mesh + many instances
+        # Generate grass using instancing with frustum culling patches
         grass_blade_mesh = self._build_grass_blade_mesh()
-        grass_instance_data = self._build_grass_instance_data(area_size=2000.0, num_blades=500000, center_x=tree.root_x)
         self.ground_vbo = self.ctx.buffer(data=array('f', grass_blade_mesh))
-        self.ground_instance_vbo = self.ctx.buffer(data=array('f', grass_instance_data))
-        self.grass_instance_count = len(grass_instance_data) // 7  # 7 floats per instance
+
+        # Create patches for frustum culling (20x20 grid = 400 patches)
+        grass_patches = self._build_grass_instance_data_patches(
+            area_size=2000.0,
+            num_blades=500000,
+            center_x=tree.root_x,
+            grid_size=20
+        )
+
+        # Create separate buffers and VAOs for each patch
+        self.grass_patches = []
+        for patch_data in grass_patches:
+            if patch_data['instance_count'] > 0:
+                instance_vbo = self.ctx.buffer(data=array('f', patch_data['instance_data']))
+                self.grass_patches.append({
+                    'bounds': patch_data['bounds'],
+                    'instance_count': patch_data['instance_count'],
+                    'vbo': instance_vbo,
+                })
+            else:
+                # Empty patch (shouldn't happen with current logic, but handle it)
+                pass
 
         self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 96)
         self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 128)
@@ -2580,14 +2674,24 @@ class OpenGLRenderer:
             ],
         )
 
-        self.ground_vao = self.ctx.vertex_array(
-            self.ground_program,
-            [
-                (self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv"),
-                (self.ground_instance_vbo, "2f f f f 2f /i",
-                 "in_position_xz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
-            ],
-        )
+        # Create VAOs for each grass patch
+        for patch in self.grass_patches:
+            patch['vao'] = self.ctx.vertex_array(
+                self.ground_program,
+                [
+                    (self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv"),
+                    (patch['vbo'], "2f f f f 2f /i",
+                     "in_position_xz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
+                ],
+            )
+            patch['shadow_vao'] = self.ctx.vertex_array(
+                self.ground_shadow_program,
+                [
+                    (self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv"),
+                    (patch['vbo'], "2f f f f 2f /i",
+                     "in_position_xz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
+                ],
+            )
 
         self.sky_vao = self.ctx.vertex_array(
             self.sky_program,
@@ -2614,14 +2718,6 @@ class OpenGLRenderer:
             ],
         )
 
-        self.ground_shadow_vao = self.ctx.vertex_array(
-            self.ground_shadow_program,
-            [
-                (self.ground_vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv"),
-                (self.ground_instance_vbo, "2f f f f 2f /i",
-                 "in_position_xz", "in_rotation", "in_height", "in_width", "in_lean_xz"),
-            ],
-        )
 
         self.bird_vao = self.ctx.vertex_array(
             self.bird_program,
@@ -2694,6 +2790,10 @@ class OpenGLRenderer:
         )
         light_space = array('f', self._mul_mat4(light_proj, light_view))
 
+        # Extract frustum planes for culling grass patches
+        view_proj = self._mul_mat4(tuple(proj), tuple(view))
+        frustum_planes = self._extract_frustum_planes(view_proj)
+
         branch_instances = self.tree.build_branch_instances()
         if branch_instances:
             data = array('f', branch_instances)
@@ -2733,8 +2833,12 @@ class OpenGLRenderer:
             self.leaf_atlas.use(location=0)
             self.leaf_shadow_program["u_leaf_atlas"].value = 0
             self.leaf_shadow_vao.render(instances=self.leaf_count)
+        # Render grass shadows with frustum culling
         self.ground_shadow_program["u_light_space"].write(light_space)
-        self.ground_shadow_vao.render(instances=self.grass_instance_count)
+        for patch in self.grass_patches:
+            min_x, min_z, max_x, max_z = patch['bounds']
+            if self._aabb_in_frustum(frustum_planes, min_x, min_z, max_x, max_z):
+                patch['shadow_vao'].render(instances=patch['instance_count'])
 
         self.ctx.screen.use()
         self.ctx.viewport = (0, 0, width, height)
@@ -2765,7 +2869,12 @@ class OpenGLRenderer:
         self.ground_program["u_tree_center"].value = (self.tree.root_x, self.tree.root_y)
         self.ground_program["u_debug_view"].value = self.debug_view_mode
         self.ground_program["u_time"].value = self.tree.time
-        self.ground_vao.render(instances=self.grass_instance_count)
+
+        # Render grass patches with frustum culling
+        for patch in self.grass_patches:
+            min_x, min_z, max_x, max_z = patch['bounds']
+            if self._aabb_in_frustum(frustum_planes, min_x, min_z, max_x, max_z):
+                patch['vao'].render(instances=patch['instance_count'])
 
         if branch_instances:
             self.branch_program["u_view"].write(view)
