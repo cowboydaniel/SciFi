@@ -1353,6 +1353,102 @@ class OpenGLRenderer:
             add_vertex(x1, y0, z1, cos1, sin1, u1, 0.0)
         return data
 
+    @staticmethod
+    def _build_grass_blades(area_size: float = 2000.0, num_blades: int = 50000, seed: int = 42) -> List[float]:
+        """Generate individual grass blades with varying heights, widths, and positions.
+
+        Each blade is a thin quad (2 triangles, 6 vertices).
+        Vertex format: position (3f), normal (3f), uv (2f)
+        """
+        import random
+        random.seed(seed)
+        data: List[float] = []
+
+        for _ in range(num_blades):
+            # Random position within area (centered at origin)
+            x = random.uniform(-area_size / 2, area_size / 2)
+            z = random.uniform(-area_size / 2, area_size / 2)
+
+            # Random blade properties
+            height = random.uniform(8.0, 25.0)  # Varying heights
+            width = random.uniform(0.8, 2.5)    # Varying widths
+            rotation = random.uniform(0, math.tau)  # Random rotation around Y axis
+
+            # Slight bend/lean
+            lean_x = random.uniform(-0.15, 0.15) * height
+            lean_z = random.uniform(-0.15, 0.15) * height
+
+            # Rotation matrix for Y-axis rotation
+            cos_rot = math.cos(rotation)
+            sin_rot = math.sin(rotation)
+
+            # Base vertices of blade (thin quad, oriented along local X axis)
+            # Bottom left, bottom right, top left, top right
+            half_width = width / 2.0
+
+            # Local space vertices (before rotation)
+            local_verts = [
+                (-half_width, 0.0, 0.0),      # Bottom left
+                (half_width, 0.0, 0.0),       # Bottom right
+                (-half_width + lean_x / height * half_width, height, lean_z),  # Top left
+                (half_width + lean_x / height * half_width, height, lean_z),   # Top right
+            ]
+
+            # Transform vertices: rotate around Y axis, then translate to position
+            world_verts = []
+            for lx, ly, lz in local_verts:
+                # Rotate around Y axis
+                wx = lx * cos_rot - lz * sin_rot
+                wy = ly
+                wz = lx * sin_rot + lz * cos_rot
+                # Translate to world position
+                wx += x
+                wz += z
+                world_verts.append((wx, wy, wz))
+
+            # Calculate normal (pointing perpendicular to blade surface)
+            # Normal in local space points in Z direction, rotate it
+            nx = -sin_rot
+            ny = 0.0
+            nz = cos_rot
+
+            # Create two triangles (6 vertices) for the blade
+            # Triangle 1: bottom-left, bottom-right, top-left
+            # Triangle 2: bottom-right, top-right, top-left
+
+            # Vertex 0: bottom-left
+            data.extend(world_verts[0])  # position
+            data.extend([nx, ny, nz])    # normal
+            data.extend([0.0, 0.0])      # uv
+
+            # Vertex 1: bottom-right
+            data.extend(world_verts[1])  # position
+            data.extend([nx, ny, nz])    # normal
+            data.extend([1.0, 0.0])      # uv
+
+            # Vertex 2: top-left
+            data.extend(world_verts[2])  # position
+            data.extend([nx, ny, nz])    # normal
+            data.extend([0.0, 1.0])      # uv
+
+            # Triangle 2
+            # Vertex 3: bottom-right
+            data.extend(world_verts[1])  # position
+            data.extend([nx, ny, nz])    # normal
+            data.extend([1.0, 0.0])      # uv
+
+            # Vertex 4: top-right
+            data.extend(world_verts[3])  # position
+            data.extend([nx, ny, nz])    # normal
+            data.extend([1.0, 1.0])      # uv
+
+            # Vertex 5: top-left
+            data.extend(world_verts[2])  # position
+            data.extend([nx, ny, nz])    # normal
+            data.extend([0.0, 1.0])      # uv
+
+        return data
+
     def __init__(self, window: pyglet.window.Window, tree: HolographicTree):
         self.window = window
         self.tree = tree
@@ -1367,8 +1463,8 @@ class OpenGLRenderer:
         self.debug_view_mode = 0  # Final with fog for atmospheric depth
 
         # Camera positioned for photo-like framing (FOV 40 degrees)
-        # Zoomed out to show full tree and ground
-        self.camera_position = (tree.w * 0.5, tree.h * 0.5, 850.0)
+        # Zoomed out to show entire tree and ground
+        self.camera_position = (tree.w * 0.5, tree.h * 0.5, 1600.0)
         self.camera_target = (tree.w * 0.5, tree.h * 0.48, 0.0)
         self.camera_up = (0.0, 1.0, 0.0)
         # Directional sun: warm light from upper-left-front
@@ -1381,8 +1477,8 @@ class OpenGLRenderer:
         self.light_color = (1.0 * 3.0, 0.97 * 3.0, 0.90 * 3.0)
         # Sky blue fog color
         self.fog_color = (0.55, 0.68, 0.82)
-        # Mild atmospheric fog for depth (not too heavy)
-        self.fog_density = 0.02
+        # Minimal fog - basically non-existent
+        self.fog_density = 0.0001
 
         self.shadow_size = 2048
         try:
@@ -1942,44 +2038,41 @@ class OpenGLRenderer:
                 }
 
                 void main() {
-                    // Sample grass texture
-                    vec2 grass_uv = v_uv * 8.0;
-                    vec4 grass_tex = texture(u_grass_albedo, grass_uv);
+                    // Individual blade appearance
+                    // v_uv.x goes from 0 (left edge) to 1 (right edge)
+                    // v_uv.y goes from 0 (bottom) to 1 (top)
 
-                    // Add procedural grass blade detail
-                    vec2 blade_uv = v_world_pos.xz * 0.08;
+                    // Base grass color with variation
+                    vec2 blade_uv = v_world_pos.xz * 0.05;
+                    float color_var = noise(blade_uv * 15.0);
+                    vec3 grass_base = vec3(0.25, 0.45, 0.15);  // Base green
+                    grass_base = mix(grass_base * 0.85, grass_base * 1.15, color_var);
 
-                    // Wind animation - multiple wave layers
-                    float wind_wave1 = sin(u_time * 1.2 + v_world_pos.x * 0.02 + v_world_pos.z * 0.015) * 0.5 + 0.5;
-                    float wind_wave2 = sin(u_time * 0.8 + v_world_pos.x * 0.03 - v_world_pos.z * 0.025) * 0.5 + 0.5;
-                    float wind = wind_wave1 * 0.6 + wind_wave2 * 0.4;
+                    // Blade shape: darker at edges, lighter in middle
+                    float edge_falloff = 1.0 - abs(v_uv.x - 0.5) * 2.0;  // 0 at edges, 1 at center
+                    edge_falloff = smoothstep(0.0, 0.4, edge_falloff);
 
-                    // Grass blade pattern using noise
-                    float blade_pattern = noise(blade_uv * 40.0 + vec2(u_time * 0.3, 0.0));
-                    blade_pattern = blade_pattern * 0.7 + noise(blade_uv * 80.0) * 0.3;
+                    // Height gradient: darker at base, lighter/yellower at tip
+                    float height_gradient = v_uv.y;
+                    vec3 tip_color = vec3(0.45, 0.55, 0.25);  // Yellowish-green
+                    vec3 base_color = grass_base * 0.7;  // Darker at base
+                    vec3 blade_color = mix(base_color, tip_color, height_gradient);
 
-                    // Create sharper grass blade stripes
-                    float blade_stripes = fract(blade_uv.x * 120.0 + noise(blade_uv * vec2(20.0, 60.0)) * 2.0);
-                    blade_stripes = smoothstep(0.3, 0.7, blade_stripes);
+                    // Add some texture variation along blade
+                    float blade_noise = noise(vec2(v_uv.y * 10.0, blade_uv.x * 20.0));
+                    blade_color *= 0.85 + blade_noise * 0.3;
 
-                    // Combine wind with blade detail
-                    float blade_detail = mix(0.8, 1.15, blade_pattern * wind);
-                    blade_detail *= mix(0.9, 1.05, blade_stripes);
+                    // Apply edge falloff
+                    blade_color *= mix(0.6, 1.0, edge_falloff);
 
-                    // Color variation for individual grass blades
-                    float color_variation = noise(blade_uv * 25.0) * 0.15;
-                    vec3 grass_base = grass_tex.rgb;
-
-                    // Add yellowish tips and darker bases
-                    float blade_tip = noise(blade_uv * 35.0 + vec2(0.0, u_time * 0.1));
-                    grass_base = mix(grass_base, grass_base * vec3(1.2, 1.15, 0.8), blade_tip * 0.2);
-                    grass_base = mix(grass_base, grass_base * vec3(0.7, 0.85, 0.65), (1.0 - blade_pattern) * 0.15);
-
-                    // Apply blade detail and color variation
-                    vec3 final_grass = grass_base * blade_detail * (1.0 + color_variation);
+                    // Wind animation - subtle movement
+                    float wind_wave1 = sin(u_time * 1.5 + v_world_pos.x * 0.03 + v_world_pos.z * 0.02) * 0.5 + 0.5;
+                    float wind_wave2 = sin(u_time * 0.9 + v_world_pos.x * 0.04 - v_world_pos.z * 0.03) * 0.5 + 0.5;
+                    float wind = (wind_wave1 * 0.6 + wind_wave2 * 0.4) * v_uv.y;  // Wind affects top more
+                    blade_color *= 0.95 + wind * 0.1;
 
                     // Decode sRGB to linear
-                    vec3 albedo = pow(final_grass, vec3(2.2));
+                    vec3 albedo = pow(blade_color, vec3(2.2));
 
                     vec3 normal = normalize(v_normal);
 
@@ -2306,17 +2399,10 @@ class OpenGLRenderer:
         self.cylinder_vbo = self.ctx.buffer(data=array('f', cylinder))
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
-        ground_size = 4000.0
-        ground_y = 0.0
-        ground = [
-            -ground_size, ground_y, -ground_size, 0.0, 1.0, 0.0, 0.0, 0.0,
-            ground_size, ground_y, -ground_size, 0.0, 1.0, 0.0, 1.0, 0.0,
-            ground_size, ground_y, ground_size, 0.0, 1.0, 0.0, 1.0, 1.0,
-            -ground_size, ground_y, -ground_size, 0.0, 1.0, 0.0, 0.0, 0.0,
-            ground_size, ground_y, ground_size, 0.0, 1.0, 0.0, 1.0, 1.0,
-            -ground_size, ground_y, ground_size, 0.0, 1.0, 0.0, 0.0, 1.0,
-        ]
-        self.ground_vbo = self.ctx.buffer(data=array('f', ground))
+        # Generate individual grass blades instead of a single quad
+        grass_blades = self._build_grass_blades(area_size=2000.0, num_blades=50000)
+        self.ground_vbo = self.ctx.buffer(data=array('f', grass_blades))
+        self.grass_blade_count = len(grass_blades) // 8  # 8 floats per vertex (3 pos + 3 normal + 2 uv)
 
         self.branch_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 96)
         self.leaf_instance_vbo = self.ctx.buffer(reserve=4 * 1024 * 128)
