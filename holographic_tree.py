@@ -1959,7 +1959,7 @@ class OpenGLRenderer:
                     blade_pattern = blade_pattern * 0.7 + noise(blade_uv * 80.0) * 0.3;
 
                     // Create sharper grass blade stripes
-                    float blade_stripes = fract(blade_uv.x * 120.0 + noise(blade_uv.y * 60.0) * 2.0);
+                    float blade_stripes = fract(blade_uv.x * 120.0 + noise(blade_uv * vec2(20.0, 60.0)) * 2.0);
                     blade_stripes = smoothstep(0.3, 0.7, blade_stripes);
 
                     // Combine wind with blade detail
