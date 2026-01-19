@@ -137,7 +137,7 @@ def generate_leaf_rgba(size=128, seed=0, variant=0):
 
 def generate_bark_albedo(size=256, seed=0):
     """
-    Generate procedural bark albedo (color) texture.
+    Generate procedural bark albedo (color) texture with enhanced realism.
 
     Returns:
         numpy array of shape (size, size, 3) with uint8 values
@@ -150,30 +150,61 @@ def generate_bark_albedo(size=256, seed=0):
         indexing='ij'
     )
 
-    # Base bark noise (rough texture)
-    bark_noise = _fbm_noise(x * size * 0.05, y * size * 0.05, octaves=5, persistence=0.55, seed=seed)
+    # Base bark noise with multiple octaves for rich detail
+    bark_noise = _fbm_noise(x * size * 0.06, y * size * 0.06, octaves=6, persistence=0.6, seed=seed)
 
-    # Vertical grain pattern
-    grain = _fbm_noise(x * size * 0.3, y * size * 0.02, octaves=3, persistence=0.4, seed=seed + 50)
-    grain = grain * 0.4 + 0.6
+    # Fine detail layer for micro-texture
+    fine_detail = _fbm_noise(x * size * 0.2, y * size * 0.2, octaves=4, persistence=0.5, seed=seed + 10)
 
-    # Darker crevices (vertical)
-    crevice = _fbm_noise(x * size * 0.15, y * size * 0.04, octaves=4, persistence=0.5, seed=seed + 100)
-    crevice = _smoothstep(0.4, 0.6, crevice)
-    darken = 1.0 - crevice * 0.4
+    # Vertical grain pattern (more pronounced)
+    grain = _fbm_noise(x * size * 0.4, y * size * 0.018, octaves=4, persistence=0.45, seed=seed + 50)
+    grain = grain * 0.5 + 0.5
 
-    # Combine noise patterns
-    brightness = bark_noise * grain * darken
-    brightness = brightness * 0.5 + 0.25  # Remap to darker range
+    # Stronger vertical crevices with variation
+    crevice = _fbm_noise(x * size * 0.18, y * size * 0.035, octaves=5, persistence=0.55, seed=seed + 100)
+    crevice = _smoothstep(0.35, 0.65, crevice)
+    deep_crevice = _smoothstep(0.45, 0.55, crevice)
+    darken = 1.0 - crevice * 0.5 - deep_crevice * 0.25
 
-    # Warm brown color
-    base_r = rng.uniform(0.45, 0.55)
-    base_g = rng.uniform(0.3, 0.38)
-    base_b = rng.uniform(0.2, 0.28)
+    # Add horizontal bark plates/scales
+    plates = _fbm_noise(x * size * 0.12, y * size * 0.25, octaves=3, persistence=0.4, seed=seed + 150)
+    plates = _smoothstep(0.4, 0.6, plates)
+    plate_darken = 1.0 - plates * 0.15
 
-    r = np.clip(brightness * base_r * 1.1, 0, 1)
-    g = np.clip(brightness * base_g, 0, 1)
-    b = np.clip(brightness * base_b, 0, 1)
+    # Bark knots and imperfections
+    knots = _fbm_noise(x * size * 0.08, y * size * 0.08, octaves=3, persistence=0.5, seed=seed + 200)
+    knots = _smoothstep(0.6, 0.8, knots)
+
+    # Combine all patterns
+    brightness = bark_noise * 0.6 + fine_detail * 0.25 + knots * 0.15
+    brightness = brightness * grain * darken * plate_darken
+    brightness = brightness * 0.55 + 0.2  # Remap to natural bark range
+
+    # More varied and realistic brown colors
+    base_r = rng.uniform(0.38, 0.48)
+    base_g = rng.uniform(0.25, 0.35)
+    base_b = rng.uniform(0.16, 0.24)
+
+    # Color variation across the texture
+    color_var = _fbm_noise(x * size * 0.04, y * size * 0.04, octaves=2, persistence=0.5, seed=seed + 250)
+    r_mult = 1.0 + color_var * 0.2
+    g_mult = 1.0 + color_var * 0.15
+    b_mult = 1.0 + color_var * 0.1
+
+    # Apply colors with variation
+    r = np.clip(brightness * base_r * r_mult * 1.15, 0, 1)
+    g = np.clip(brightness * base_g * g_mult * 1.05, 0, 1)
+    b = np.clip(brightness * base_b * b_mult, 0, 1)
+
+    # Add subtle reddish-brown highlights in lighter areas
+    highlight_mask = _smoothstep(0.5, 0.7, brightness)
+    r = r + highlight_mask * 0.08
+    g = g + highlight_mask * 0.03
+
+    # Ensure proper range
+    r = np.clip(r, 0, 1)
+    g = np.clip(g, 0, 1)
+    b = np.clip(b, 0, 1)
 
     # Convert to uint8
     rgb = np.stack([r, g, b], axis=-1)
@@ -184,7 +215,7 @@ def generate_bark_albedo(size=256, seed=0):
 
 def generate_bark_normal(size=256, seed=0):
     """
-    Generate procedural bark normal map (tangent space).
+    Generate procedural bark normal map (tangent space) with enhanced detail.
 
     Returns:
         numpy array of shape (size, size, 3) with uint8 values (0-255 maps to -1 to 1)
@@ -197,15 +228,28 @@ def generate_bark_normal(size=256, seed=0):
         indexing='ij'
     )
 
-    # Generate height map (same patterns as albedo)
-    height = _fbm_noise(x * size * 0.05, y * size * 0.05, octaves=5, persistence=0.55, seed=seed)
+    # Generate height map with enhanced detail
+    height = _fbm_noise(x * size * 0.06, y * size * 0.06, octaves=6, persistence=0.6, seed=seed)
 
-    # Add vertical grain bumps
-    grain = _fbm_noise(x * size * 0.3, y * size * 0.02, octaves=3, persistence=0.4, seed=seed + 50)
-    height = height * 0.7 + grain * 0.3
+    # Fine detail layer
+    fine_detail = _fbm_noise(x * size * 0.2, y * size * 0.2, octaves=4, persistence=0.5, seed=seed + 10)
 
-    # Scale height
-    height = height * 0.3
+    # Stronger vertical grain bumps
+    grain = _fbm_noise(x * size * 0.4, y * size * 0.018, octaves=4, persistence=0.45, seed=seed + 50)
+
+    # Deep crevices
+    crevice = _fbm_noise(x * size * 0.18, y * size * 0.035, octaves=5, persistence=0.55, seed=seed + 100)
+    crevice = _smoothstep(0.35, 0.65, crevice) * -0.4  # Negative for depth
+
+    # Bark plates
+    plates = _fbm_noise(x * size * 0.12, y * size * 0.25, octaves=3, persistence=0.4, seed=seed + 150)
+    plates = _smoothstep(0.4, 0.6, plates) * 0.2
+
+    # Combine all height patterns
+    height = height * 0.4 + fine_detail * 0.15 + grain * 0.35 + crevice + plates * 0.1
+
+    # Scale height for more pronounced bumps
+    height = height * 0.45
 
     # Compute gradients (derivatives)
     dx = np.zeros_like(height)
@@ -276,7 +320,7 @@ def generate_bark_roughness(size=256, seed=0):
 
 def generate_grass_albedo(size=512, seed=0):
     """
-    Generate procedural grass albedo texture.
+    Generate procedural grass albedo texture with enhanced realism.
 
     Returns:
         numpy array of shape (size, size, 3) with uint8 values
@@ -289,25 +333,51 @@ def generate_grass_albedo(size=512, seed=0):
         indexing='ij'
     )
 
-    # Multi-scale grass noise
-    grass_noise = _fbm_noise(x * size * 0.1, y * size * 0.1, octaves=5, persistence=0.5, seed=seed)
+    # Multi-scale grass noise with more octaves
+    grass_noise = _fbm_noise(x * size * 0.12, y * size * 0.12, octaves=6, persistence=0.52, seed=seed)
 
-    # Add finer detail
-    detail = _fbm_noise(x * size * 0.4, y * size * 0.4, octaves=3, persistence=0.6, seed=seed + 200)
-    grass_noise = grass_noise * 0.7 + detail * 0.3
+    # Add finer detail for grass blade texture
+    detail = _fbm_noise(x * size * 0.45, y * size * 0.45, octaves=4, persistence=0.6, seed=seed + 200)
+    grass_noise = grass_noise * 0.65 + detail * 0.35
 
-    # Color variation (green with some yellowing and dark patches)
-    base_brightness = grass_noise * 0.4 + 0.4
+    # Very fine micro-detail
+    micro_detail = _fbm_noise(x * size * 0.8, y * size * 0.8, octaves=2, persistence=0.5, seed=seed + 300)
+    grass_noise = grass_noise * 0.85 + micro_detail * 0.15
 
-    # Base grass green
-    base_r = rng.uniform(0.25, 0.35)
-    base_g = rng.uniform(0.45, 0.55)
-    base_b = rng.uniform(0.2, 0.3)
+    # Patchy variation (clumps of grass)
+    patches = _fbm_noise(x * size * 0.05, y * size * 0.05, octaves=3, persistence=0.5, seed=seed + 100)
+    patches = _smoothstep(0.3, 0.7, patches)
 
-    # Add color variation
-    r = np.clip(base_brightness * base_r * 1.1, 0, 1)
-    g = np.clip(base_brightness * base_g, 0, 1)
-    b = np.clip(base_brightness * base_b, 0, 1)
+    # Color variation with patches
+    base_brightness = (grass_noise * 0.5 + patches * 0.3) + 0.35
+
+    # More varied grass green with richer tones
+    base_r = rng.uniform(0.22, 0.32)
+    base_g = rng.uniform(0.48, 0.58)
+    base_b = rng.uniform(0.18, 0.28)
+
+    # Add color variation for different grass types
+    color_var = _fbm_noise(x * size * 0.08, y * size * 0.08, octaves=2, persistence=0.5, seed=seed + 150)
+    r_mult = 1.0 + color_var * 0.25
+    g_mult = 1.0 + color_var * 0.15
+    b_mult = 1.0 + color_var * 0.2
+
+    # Apply colors with variation
+    r = np.clip(base_brightness * base_r * r_mult * 1.15, 0, 1)
+    g = np.clip(base_brightness * base_g * g_mult * 1.05, 0, 1)
+    b = np.clip(base_brightness * base_b * b_mult, 0, 1)
+
+    # Add some yellowish dried grass patches
+    dry_patches = _fbm_noise(x * size * 0.06, y * size * 0.06, octaves=2, persistence=0.5, seed=seed + 250)
+    dry_patches = _smoothstep(0.65, 0.75, dry_patches)
+    r = r + dry_patches * 0.12
+    g = g + dry_patches * 0.08
+    b = b - dry_patches * 0.02
+
+    # Ensure proper range
+    r = np.clip(r, 0, 1)
+    g = np.clip(g, 0, 1)
+    b = np.clip(b, 0, 1)
 
     # Convert to uint8
     rgb = np.stack([r, g, b], axis=-1)
@@ -1297,8 +1367,8 @@ class OpenGLRenderer:
         self.debug_view_mode = 0  # Final with fog for atmospheric depth
 
         # Camera positioned for photo-like framing (FOV 40 degrees)
-        # Further back and lower to show full tree and ground
-        self.camera_position = (tree.w * 0.5, tree.h * 0.5, 650.0)
+        # Zoomed out to show full tree and ground
+        self.camera_position = (tree.w * 0.5, tree.h * 0.5, 850.0)
         self.camera_target = (tree.w * 0.5, tree.h * 0.48, 0.0)
         self.camera_up = (0.0, 1.0, 0.0)
         # Directional sun: warm light from upper-left-front
@@ -1826,6 +1896,7 @@ class OpenGLRenderer:
                 uniform float u_fog_density;
                 uniform vec2 u_tree_center;
                 uniform int u_debug_view;
+                uniform float u_time;
 
                 out vec4 f_color;
 
@@ -1853,13 +1924,62 @@ class OpenGLRenderer:
                     return shadow / 9.0;
                 }
 
+                // Hash function for pseudo-random values
+                float hash(vec2 p) {
+                    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+                }
+
+                // 2D noise function
+                float noise(vec2 p) {
+                    vec2 i = floor(p);
+                    vec2 f = fract(p);
+                    f = f * f * (3.0 - 2.0 * f);
+                    float a = hash(i);
+                    float b = hash(i + vec2(1.0, 0.0));
+                    float c = hash(i + vec2(0.0, 1.0));
+                    float d = hash(i + vec2(1.0, 1.0));
+                    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+                }
+
                 void main() {
                     // Sample grass texture
                     vec2 grass_uv = v_uv * 8.0;
                     vec4 grass_tex = texture(u_grass_albedo, grass_uv);
 
+                    // Add procedural grass blade detail
+                    vec2 blade_uv = v_world_pos.xz * 0.08;
+
+                    // Wind animation - multiple wave layers
+                    float wind_wave1 = sin(u_time * 1.2 + v_world_pos.x * 0.02 + v_world_pos.z * 0.015) * 0.5 + 0.5;
+                    float wind_wave2 = sin(u_time * 0.8 + v_world_pos.x * 0.03 - v_world_pos.z * 0.025) * 0.5 + 0.5;
+                    float wind = wind_wave1 * 0.6 + wind_wave2 * 0.4;
+
+                    // Grass blade pattern using noise
+                    float blade_pattern = noise(blade_uv * 40.0 + vec2(u_time * 0.3, 0.0));
+                    blade_pattern = blade_pattern * 0.7 + noise(blade_uv * 80.0) * 0.3;
+
+                    // Create sharper grass blade stripes
+                    float blade_stripes = fract(blade_uv.x * 120.0 + noise(blade_uv.y * 60.0) * 2.0);
+                    blade_stripes = smoothstep(0.3, 0.7, blade_stripes);
+
+                    // Combine wind with blade detail
+                    float blade_detail = mix(0.8, 1.15, blade_pattern * wind);
+                    blade_detail *= mix(0.9, 1.05, blade_stripes);
+
+                    // Color variation for individual grass blades
+                    float color_variation = noise(blade_uv * 25.0) * 0.15;
+                    vec3 grass_base = grass_tex.rgb;
+
+                    // Add yellowish tips and darker bases
+                    float blade_tip = noise(blade_uv * 35.0 + vec2(0.0, u_time * 0.1));
+                    grass_base = mix(grass_base, grass_base * vec3(1.2, 1.15, 0.8), blade_tip * 0.2);
+                    grass_base = mix(grass_base, grass_base * vec3(0.7, 0.85, 0.65), (1.0 - blade_pattern) * 0.15);
+
+                    // Apply blade detail and color variation
+                    vec3 final_grass = grass_base * blade_detail * (1.0 + color_variation);
+
                     // Decode sRGB to linear
-                    vec3 albedo = pow(grass_tex.rgb, vec3(2.2));
+                    vec3 albedo = pow(final_grass, vec3(2.2));
 
                     vec3 normal = normalize(v_normal);
 
@@ -2186,7 +2306,7 @@ class OpenGLRenderer:
         self.cylinder_vbo = self.ctx.buffer(data=array('f', cylinder))
         self.quad_vbo = self.ctx.buffer(data=array('f', quad))
 
-        ground_size = 2200.0
+        ground_size = 4000.0
         ground_y = 0.0
         ground = [
             -ground_size, ground_y, -ground_size, 0.0, 1.0, 0.0, 0.0, 0.0,
@@ -2410,6 +2530,7 @@ class OpenGLRenderer:
         self.ground_program["u_fog_density"].value = self.fog_density
         self.ground_program["u_tree_center"].value = (self.tree.root_x, self.tree.root_y)
         self.ground_program["u_debug_view"].value = self.debug_view_mode
+        self.ground_program["u_time"].value = self.time
         self.ground_vao.render()
 
         if branch_instances:
@@ -2417,7 +2538,7 @@ class OpenGLRenderer:
             self.branch_program["u_proj"].write(proj)
             self.branch_program["u_light_space"].write(light_space)
             self.branch_program["u_camera_pos"].value = self.camera_position
-            self.branch_program["u_bark_uv_scale"].value = (0.05, 1.0)
+            self.branch_program["u_bark_uv_scale"].value = (0.08, 1.2)
             self.branch_program["u_has_normal"].value = 1 if self.has_bark_normal else 0
             self.branch_program["u_has_roughness"].value = 1 if self.has_bark_roughness else 0
             self.bark_albedo.use(location=0)
