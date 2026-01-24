@@ -1929,6 +1929,9 @@ class OpenGLRenderer:
             for key in sorted(self.ctx.info.keys()):
                 print(f"- {key}")
             print("------------------\n")
+
+            # Feature flags
+            self.texture_buffer_supported = hasattr(self.ctx, "texture_buffer")
             
             # Initialize rendering resources
             try:
@@ -2192,162 +2195,6 @@ class OpenGLRenderer:
     def _init_leaf_rendering(self):
         """Initialize shaders and buffers for leaf rendering."""
         try:
-            self.leaf_program = self.ctx.program(
-                vertex_shader="""
-                    #version 330
-                    uniform samplerBuffer u_branch_positions;
-                    uniform mat4 u_view;
-                    uniform mat4 u_proj;
-                    uniform mat4 u_light_space;
-                    uniform vec2 u_atlas_grid;
-                    uniform int u_debug_view;
-
-                    in vec2 in_position;
-                    in float in_branch_index;
-                    in vec3 in_offset;
-                    in vec3 in_axis_x;
-                    in vec3 in_axis_y;
-                    in vec3 in_axis_z;
-                    in vec2 in_uv_offset;
-                    in vec2 in_uv_scale;
-                    in float in_atlas_index;
-                    in vec4 in_base_color;
-                    in vec3 in_color_variance;
-                    in float in_variance_amount;
-
-                    out vec2 v_uv;
-                    out vec3 v_world_pos;
-                    out vec3 v_normal;
-                    out vec4 v_light_pos;
-                    out vec4 v_color;
-                    flat out int v_debug_view;
-
-                    vec3 fetch_branch_pos(int idx) {
-                        return texelFetch(u_branch_positions, idx).xyz;
-                    }
-
-                    float hash(vec3 p) {
-                        return fract(sin(dot(p, vec3(12.9898, 78.233, 39.425))) * 43758.5453);
-                    }
-
-                    void main() {
-                        int branch_idx = int(in_branch_index + 0.5);
-                        vec3 branch_pos = fetch_branch_pos(branch_idx);
-                        vec3 local = in_axis_x * in_position.x + in_axis_y * in_position.y;
-                        vec3 world_pos = branch_pos + in_offset + local;
-
-                        vec2 base_uv = in_position * 0.5 + 0.5;
-                        float atlas_cols = max(u_atlas_grid.x, 1.0);
-                        float atlas_rows = max(u_atlas_grid.y, 1.0);
-                        float atlas_idx = max(in_atlas_index, 0.0);
-                        float col = mod(atlas_idx, atlas_cols);
-                        float row = floor(atlas_idx / atlas_cols);
-                        vec2 atlas_origin = vec2(col, row) / vec2(atlas_cols, atlas_rows);
-                        vec2 atlas_scale = vec2(1.0 / atlas_cols, 1.0 / atlas_rows);
-                        v_uv = atlas_origin + (in_uv_offset + base_uv * in_uv_scale) * atlas_scale;
-
-                        float noise = hash(vec3(branch_idx, in_offset.x, in_offset.y));
-                        vec3 variance = (noise * 2.0 - 1.0) * in_color_variance * in_variance_amount;
-                        vec3 color = clamp(in_base_color.rgb + variance, 0.0, 1.5);
-
-                        v_world_pos = world_pos;
-                        v_normal = normalize(in_axis_z);
-                        v_light_pos = u_light_space * vec4(world_pos, 1.0);
-                        v_color = vec4(color, in_base_color.a);
-                        v_debug_view = u_debug_view;
-
-                        gl_Position = u_proj * u_view * vec4(world_pos, 1.0);
-                    }
-                """,
-                fragment_shader="""
-                    #version 330
-                    uniform sampler2D u_leaf_atlas;
-                    uniform sampler2DShadow u_shadow_map;
-                    uniform vec2 u_shadow_texel;
-                    uniform float u_alpha_cutoff;
-                    uniform vec3 u_light_dir;
-                    uniform vec3 u_light_color;
-                    uniform vec3 u_camera_pos;
-                    uniform vec3 u_fog_color;
-                    uniform float u_fog_density;
-                    uniform float u_canopy_center_y;
-                    uniform float u_canopy_half_height;
-                    uniform int u_debug_view;
-
-                    in vec2 v_uv;
-                    in vec3 v_world_pos;
-                    in vec3 v_normal;
-                    in vec4 v_light_pos;
-                    in vec4 v_color;
-                    flat in int v_debug_view;
-
-                    out vec4 f_color;
-
-                    float compute_shadow(vec4 light_pos) {
-                        if (u_shadow_texel.x <= 0.0 || u_shadow_texel.y <= 0.0) {
-                            return 1.0;
-                        }
-                        vec3 proj = light_pos.xyz / max(light_pos.w, 0.0001);
-                        vec3 shadow_coord = proj * 0.5 + 0.5;
-                        if (shadow_coord.z > 1.0) {
-                            return 1.0;
-                        }
-
-                        float bias = 0.0008;
-                        float shadow = 0.0;
-                        for (int x = -1; x <= 1; ++x) {
-                            for (int y = -1; y <= 1; ++y) {
-                                vec2 offset = vec2(x, y) * u_shadow_texel;
-                                shadow += texture(u_shadow_map, vec3(shadow_coord.xy + offset, shadow_coord.z - bias));
-                            }
-                        }
-                        return shadow / 9.0;
-                    }
-
-                    void main() {
-                        vec4 tex = texture(u_leaf_atlas, v_uv);
-                        float alpha = tex.a * v_color.a;
-                        if (alpha < u_alpha_cutoff) {
-                            discard;
-                        }
-
-                        vec3 n = normalize(v_normal);
-                        vec3 light_dir = normalize(-u_light_dir);
-                        float ndl = max(dot(n, light_dir), 0.0);
-                        float shadow = compute_shadow(v_light_pos);
-
-                        float height_norm = 0.5;
-                        if (u_canopy_half_height > 0.0) {
-                            height_norm = clamp(
-                                (v_world_pos.y - (u_canopy_center_y - u_canopy_half_height)) / (2.0 * u_canopy_half_height),
-                                0.0,
-                                1.0
-                            );
-                        }
-                        vec3 canopy_tint = mix(vec3(0.92, 0.98, 0.9), vec3(1.05, 1.1, 1.02), height_norm);
-
-                        vec3 albedo = tex.rgb * v_color.rgb * canopy_tint;
-                        vec3 lit = albedo * (0.25 + ndl * shadow) * u_light_color;
-
-                        if (u_debug_view != 0 || v_debug_view != 0) {
-                            int mode = v_debug_view != 0 ? v_debug_view : u_debug_view;
-                            if (mode == 1) {
-                                lit = n * 0.5 + 0.5;
-                            } else if (mode == 2) {
-                                lit = albedo;
-                            } else if (mode == 3) {
-                                lit = vec3(alpha);
-                            }
-                        }
-
-                        float dist = length(u_camera_pos - v_world_pos);
-                        float fog = 1.0 - exp(-u_fog_density * dist * 0.0018);
-                        vec3 color = mix(lit, u_fog_color, clamp(fog, 0.0, 1.0));
-                        f_color = vec4(color, alpha);
-                    }
-                """
-            )
-
             # Ensure the instance buffer can hold the full per-instance layout
             if getattr(self, "leaf_instance_vbo", None):
                 self.leaf_instance_vbo.release()
@@ -2359,27 +2206,356 @@ class OpenGLRenderer:
             )
             self.leaf_vbo = self.ctx.buffer(leaf_vertices.tobytes())
 
-            self.leaf_vao = self.ctx.vertex_array(
-                self.leaf_program,
-                [
-                    (self.leaf_vbo, "2f", "in_position"),
-                    (
-                        self.leaf_instance_vbo,
-                        "1f 3f 3f 3f 3f 2f 2f 1f 4f 3f 1f /i",
-                        "in_branch_index",
-                        "in_offset",
-                        "in_axis_x",
-                        "in_axis_y",
-                        "in_axis_z",
-                        "in_uv_offset",
-                        "in_uv_scale",
-                        "in_atlas_index",
-                        "in_base_color",
-                        "in_color_variance",
-                        "in_variance_amount",
-                    ),
-                ],
-            )
+            if self.texture_buffer_supported:
+                self.leaf_program = self.ctx.program(
+                    vertex_shader="""
+                        #version 330
+                        uniform samplerBuffer u_branch_positions;
+                        uniform mat4 u_view;
+                        uniform mat4 u_proj;
+                        uniform mat4 u_light_space;
+                        uniform vec2 u_atlas_grid;
+                        uniform int u_debug_view;
+
+                        in vec2 in_position;
+                        in float in_branch_index;
+                        in vec3 in_offset;
+                        in vec3 in_axis_x;
+                        in vec3 in_axis_y;
+                        in vec3 in_axis_z;
+                        in vec2 in_uv_offset;
+                        in vec2 in_uv_scale;
+                        in float in_atlas_index;
+                        in vec4 in_base_color;
+                        in vec3 in_color_variance;
+                        in float in_variance_amount;
+
+                        out vec2 v_uv;
+                        out vec3 v_world_pos;
+                        out vec3 v_normal;
+                        out vec4 v_light_pos;
+                        out vec4 v_color;
+                        flat out int v_debug_view;
+
+                        vec3 fetch_branch_pos(int idx) {
+                            return texelFetch(u_branch_positions, idx).xyz;
+                        }
+
+                        float hash(vec3 p) {
+                            return fract(sin(dot(p, vec3(12.9898, 78.233, 39.425))) * 43758.5453);
+                        }
+
+                        void main() {
+                            int branch_idx = int(in_branch_index + 0.5);
+                            vec3 branch_pos = fetch_branch_pos(branch_idx);
+                            vec3 local = in_axis_x * in_position.x + in_axis_y * in_position.y;
+                            vec3 world_pos = branch_pos + in_offset + local;
+
+                            vec2 base_uv = in_position * 0.5 + 0.5;
+                            float atlas_cols = max(u_atlas_grid.x, 1.0);
+                            float atlas_rows = max(u_atlas_grid.y, 1.0);
+                            float atlas_idx = max(in_atlas_index, 0.0);
+                            float col = mod(atlas_idx, atlas_cols);
+                            float row = floor(atlas_idx / atlas_cols);
+                            vec2 atlas_origin = vec2(col, row) / vec2(atlas_cols, atlas_rows);
+                            vec2 atlas_scale = vec2(1.0 / atlas_cols, 1.0 / atlas_rows);
+                            v_uv = atlas_origin + (in_uv_offset + base_uv * in_uv_scale) * atlas_scale;
+
+                            float noise = hash(vec3(branch_idx, in_offset.x, in_offset.y));
+                            vec3 variance = (noise * 2.0 - 1.0) * in_color_variance * in_variance_amount;
+                            vec3 color = clamp(in_base_color.rgb + variance, 0.0, 1.5);
+
+                            v_world_pos = world_pos;
+                            v_normal = normalize(in_axis_z);
+                            v_light_pos = u_light_space * vec4(world_pos, 1.0);
+                            v_color = vec4(color, in_base_color.a);
+                            v_debug_view = u_debug_view;
+
+                            gl_Position = u_proj * u_view * vec4(world_pos, 1.0);
+                        }
+                    """,
+                    fragment_shader="""
+                        #version 330
+                        uniform sampler2D u_leaf_atlas;
+                        uniform sampler2DShadow u_shadow_map;
+                        uniform vec2 u_shadow_texel;
+                        uniform float u_alpha_cutoff;
+                        uniform vec3 u_light_dir;
+                        uniform vec3 u_light_color;
+                        uniform vec3 u_camera_pos;
+                        uniform vec3 u_fog_color;
+                        uniform float u_fog_density;
+                        uniform float u_canopy_center_y;
+                        uniform float u_canopy_half_height;
+                        uniform int u_debug_view;
+
+                        in vec2 v_uv;
+                        in vec3 v_world_pos;
+                        in vec3 v_normal;
+                        in vec4 v_light_pos;
+                        in vec4 v_color;
+                        flat in int v_debug_view;
+
+                        out vec4 f_color;
+
+                        float compute_shadow(vec4 light_pos) {
+                            if (u_shadow_texel.x <= 0.0 || u_shadow_texel.y <= 0.0) {
+                                return 1.0;
+                            }
+                            vec3 proj = light_pos.xyz / max(light_pos.w, 0.0001);
+                            vec3 shadow_coord = proj * 0.5 + 0.5;
+                            if (shadow_coord.z > 1.0) {
+                                return 1.0;
+                            }
+
+                            float bias = 0.0008;
+                            float shadow = 0.0;
+                            for (int x = -1; x <= 1; ++x) {
+                                for (int y = -1; y <= 1; ++y) {
+                                    vec2 offset = vec2(x, y) * u_shadow_texel;
+                                    shadow += texture(u_shadow_map, vec3(shadow_coord.xy + offset, shadow_coord.z - bias));
+                                }
+                            }
+                            return shadow / 9.0;
+                        }
+
+                        void main() {
+                            vec4 tex = texture(u_leaf_atlas, v_uv);
+                            float alpha = tex.a * v_color.a;
+                            if (alpha < u_alpha_cutoff) {
+                                discard;
+                            }
+
+                            vec3 n = normalize(v_normal);
+                            vec3 light_dir = normalize(-u_light_dir);
+                            float ndl = max(dot(n, light_dir), 0.0);
+                            float shadow = compute_shadow(v_light_pos);
+
+                            float height_norm = 0.5;
+                            if (u_canopy_half_height > 0.0) {
+                                height_norm = clamp(
+                                    (v_world_pos.y - (u_canopy_center_y - u_canopy_half_height)) / (2.0 * u_canopy_half_height),
+                                    0.0,
+                                    1.0
+                                );
+                            }
+                            vec3 canopy_tint = mix(vec3(0.92, 0.98, 0.9), vec3(1.05, 1.1, 1.02), height_norm);
+
+                            vec3 albedo = tex.rgb * v_color.rgb * canopy_tint;
+                            vec3 lit = albedo * (0.25 + ndl * shadow) * u_light_color;
+
+                            if (u_debug_view != 0 || v_debug_view != 0) {
+                                int mode = v_debug_view != 0 ? v_debug_view : u_debug_view;
+                                if (mode == 1) {
+                                    lit = n * 0.5 + 0.5;
+                                } else if (mode == 2) {
+                                    lit = albedo;
+                                } else if (mode == 3) {
+                                    lit = vec3(alpha);
+                                }
+                            }
+
+                            float dist = length(u_camera_pos - v_world_pos);
+                            float fog = 1.0 - exp(-u_fog_density * dist * 0.0018);
+                            vec3 color = mix(lit, u_fog_color, clamp(fog, 0.0, 1.0));
+                            f_color = vec4(color, alpha);
+                        }
+                    """
+                )
+
+                self.leaf_vao = self.ctx.vertex_array(
+                    self.leaf_program,
+                    [
+                        (self.leaf_vbo, "2f", "in_position"),
+                        (
+                            self.leaf_instance_vbo,
+                            "1f 3f 3f 3f 3f 2f 2f 1f 4f 3f 1f /i",
+                            "in_branch_index",
+                            "in_offset",
+                            "in_axis_x",
+                            "in_axis_y",
+                            "in_axis_z",
+                            "in_uv_offset",
+                            "in_uv_scale",
+                            "in_atlas_index",
+                            "in_base_color",
+                            "in_color_variance",
+                            "in_variance_amount",
+                        ),
+                    ],
+                )
+            else:
+                print("Texture buffers not supported: using CPU-updated leaf positions.")
+                self.leaf_program = self.ctx.program(
+                    vertex_shader="""
+                        #version 330
+                        uniform mat4 u_view;
+                        uniform mat4 u_proj;
+                        uniform mat4 u_light_space;
+                        uniform vec2 u_atlas_grid;
+                        uniform int u_debug_view;
+
+                        in vec2 in_position;
+                        in vec3 in_world_base_pos;
+                        in float in_world_pad;
+                        in vec3 in_axis_x;
+                        in vec3 in_axis_y;
+                        in vec3 in_axis_z;
+                        in vec2 in_uv_offset;
+                        in vec2 in_uv_scale;
+                        in float in_atlas_index;
+                        in vec4 in_base_color;
+                        in vec3 in_color_variance;
+                        in float in_variance_amount;
+
+                        out vec2 v_uv;
+                        out vec3 v_world_pos;
+                        out vec3 v_normal;
+                        out vec4 v_light_pos;
+                        out vec4 v_color;
+                        flat out int v_debug_view;
+
+                        float hash(vec3 p) {
+                            return fract(sin(dot(p, vec3(12.9898, 78.233, 39.425))) * 43758.5453);
+                        }
+
+                        void main() {
+                            vec3 local = in_axis_x * in_position.x + in_axis_y * in_position.y;
+                            vec3 world_pos = in_world_base_pos + local;
+
+                            vec2 base_uv = in_position * 0.5 + 0.5;
+                            float atlas_cols = max(u_atlas_grid.x, 1.0);
+                            float atlas_rows = max(u_atlas_grid.y, 1.0);
+                            float atlas_idx = max(in_atlas_index, 0.0);
+                            float col = mod(atlas_idx, atlas_cols);
+                            float row = floor(atlas_idx / atlas_cols);
+                            vec2 atlas_origin = vec2(col, row) / vec2(atlas_cols, atlas_rows);
+                            vec2 atlas_scale = vec2(1.0 / atlas_cols, 1.0 / atlas_rows);
+                            v_uv = atlas_origin + (in_uv_offset + base_uv * in_uv_scale) * atlas_scale;
+
+                            float noise = hash(in_world_base_pos + vec3(in_atlas_index));
+                            vec3 variance = (noise * 2.0 - 1.0) * in_color_variance * in_variance_amount;
+                            vec3 color = clamp(in_base_color.rgb + variance, 0.0, 1.5);
+
+                            v_world_pos = world_pos;
+                            v_normal = normalize(in_axis_z);
+                            v_light_pos = u_light_space * vec4(world_pos, 1.0);
+                            v_color = vec4(color, in_base_color.a);
+                            v_debug_view = u_debug_view;
+
+                            gl_Position = u_proj * u_view * vec4(world_pos, 1.0);
+                        }
+                    """,
+                    fragment_shader="""
+                        #version 330
+                        uniform sampler2D u_leaf_atlas;
+                        uniform sampler2DShadow u_shadow_map;
+                        uniform vec2 u_shadow_texel;
+                        uniform float u_alpha_cutoff;
+                        uniform vec3 u_light_dir;
+                        uniform vec3 u_light_color;
+                        uniform vec3 u_camera_pos;
+                        uniform vec3 u_fog_color;
+                        uniform float u_fog_density;
+                        uniform float u_canopy_center_y;
+                        uniform float u_canopy_half_height;
+                        uniform int u_debug_view;
+
+                        in vec2 v_uv;
+                        in vec3 v_world_pos;
+                        in vec3 v_normal;
+                        in vec4 v_light_pos;
+                        in vec4 v_color;
+                        flat in int v_debug_view;
+
+                        out vec4 f_color;
+
+                        float compute_shadow(vec4 light_pos) {
+                            if (u_shadow_texel.x <= 0.0 || u_shadow_texel.y <= 0.0) {
+                                return 1.0;
+                            }
+                            vec3 proj = light_pos.xyz / max(light_pos.w, 0.0001);
+                            vec3 shadow_coord = proj * 0.5 + 0.5;
+                            if (shadow_coord.z > 1.0) {
+                                return 1.0;
+                            }
+
+                            float bias = 0.0008;
+                            float shadow = 0.0;
+                            for (int x = -1; x <= 1; ++x) {
+                                for (int y = -1; y <= 1; ++y) {
+                                    vec2 offset = vec2(x, y) * u_shadow_texel;
+                                    shadow += texture(u_shadow_map, vec3(shadow_coord.xy + offset, shadow_coord.z - bias));
+                                }
+                            }
+                            return shadow / 9.0;
+                        }
+
+                        void main() {
+                            vec4 tex = texture(u_leaf_atlas, v_uv);
+                            float alpha = tex.a * v_color.a;
+                            if (alpha < u_alpha_cutoff) {
+                                discard;
+                            }
+
+                            vec3 n = normalize(v_normal);
+                            vec3 light_dir = normalize(-u_light_dir);
+                            float ndl = max(dot(n, light_dir), 0.0);
+                            float shadow = compute_shadow(v_light_pos);
+
+                            float height_norm = 0.5;
+                            if (u_canopy_half_height > 0.0) {
+                                height_norm = clamp(
+                                    (v_world_pos.y - (u_canopy_center_y - u_canopy_half_height)) / (2.0 * u_canopy_half_height),
+                                    0.0,
+                                    1.0
+                                );
+                            }
+                            vec3 canopy_tint = mix(vec3(0.92, 0.98, 0.9), vec3(1.05, 1.1, 1.02), height_norm);
+
+                            vec3 albedo = tex.rgb * v_color.rgb * canopy_tint;
+                            vec3 lit = albedo * (0.25 + ndl * shadow) * u_light_color;
+
+                            if (u_debug_view != 0 || v_debug_view != 0) {
+                                int mode = v_debug_view != 0 ? v_debug_view : u_debug_view;
+                                if (mode == 1) {
+                                    lit = n * 0.5 + 0.5;
+                                } else if (mode == 2) {
+                                    lit = albedo;
+                                } else if (mode == 3) {
+                                    lit = vec3(alpha);
+                                }
+                            }
+
+                            float dist = length(u_camera_pos - v_world_pos);
+                            float fog = 1.0 - exp(-u_fog_density * dist * 0.0018);
+                            vec3 color = mix(lit, u_fog_color, clamp(fog, 0.0, 1.0));
+                            f_color = vec4(color, alpha);
+                        }
+                    """
+                )
+
+                self.leaf_vao = self.ctx.vertex_array(
+                    self.leaf_program,
+                    [
+                        (self.leaf_vbo, "2f", "in_position"),
+                        (
+                            self.leaf_instance_vbo,
+                            "3f 1f 3f 3f 3f 2f 2f 1f 4f 3f 1f /i",
+                            "in_world_base_pos",
+                            "in_world_pad",
+                            "in_axis_x",
+                            "in_axis_y",
+                            "in_axis_z",
+                            "in_uv_offset",
+                            "in_uv_scale",
+                            "in_atlas_index",
+                            "in_base_color",
+                            "in_color_variance",
+                            "in_variance_amount",
+                        ),
+                    ],
+                )
 
         except Exception as e:
             print(f"Error initializing leaf rendering: {e}")
@@ -2903,24 +3079,83 @@ class OpenGLRenderer:
     def _upload_static_leaf_data(self):
         """Build and upload static leaf instance data once at initialization."""
         leaf_data: List[float] = []
-        max_leaf_instances = min(len(self.tree.canopy_leaves), self.max_leaves)
-        for leaf in self.tree.canopy_leaves[:max_leaf_instances]:
-            # Static data: branch_index, offset, axes, UV, color
-            leaf_data.extend([
-                float(leaf.branch_index),      # branch index
-                *leaf.offset,                   # offset from branch (x, y, z)
-                *leaf.axis_x,                   # rotation axis x
-                *leaf.axis_y,                   # rotation axis y
-                *leaf.axis_z,                   # rotation axis z (normal)
-                *leaf.uv_offset,                # UV offset
-                *leaf.uv_scale,                 # UV scale
-                float(leaf.atlas_index),        # atlas index
-                *leaf.base_color,               # color (RGBA)
-                *leaf.color_variance,           # color variance (RGB)
-                leaf.variance_amount,           # variance amount
-            ])
+        leaf_count = 0
+        for leaf in self.tree.canopy_leaves:
+            if leaf_count >= self.max_leaves:
+                break
+            if leaf.branch_index < 0 or leaf.branch_index >= len(self.tree.branches):
+                continue
+            branch = self.tree.branches[leaf.branch_index]
+            base_x = branch.end_x + leaf.offset[0]
+            base_y = branch.end_y + leaf.offset[1]
+            base_z = branch.end_z + leaf.offset[2]
 
-        self.leaf_count = max_leaf_instances
+            if self.texture_buffer_supported:
+                leaf_data.extend([
+                    float(leaf.branch_index),      # branch index
+                    *leaf.offset,                   # offset from branch (x, y, z)
+                    *leaf.axis_x,                   # rotation axis x
+                    *leaf.axis_y,                   # rotation axis y
+                    *leaf.axis_z,                   # rotation axis z (normal)
+                    *leaf.uv_offset,                # UV offset
+                    *leaf.uv_scale,                 # UV scale
+                    float(leaf.atlas_index),        # atlas index
+                    *leaf.base_color,               # color (RGBA)
+                    *leaf.color_variance,           # color variance (RGB)
+                    leaf.variance_amount,           # variance amount
+                ])
+            else:
+                # CPU fallback: upload world base positions directly
+                leaf_data.extend([
+                    base_x, base_y, base_z, 0.0,    # world base position + pad
+                    *leaf.axis_x,                   # rotation axis x
+                    *leaf.axis_y,                   # rotation axis y
+                    *leaf.axis_z,                   # rotation axis z (normal)
+                    *leaf.uv_offset,                # UV offset
+                    *leaf.uv_scale,                 # UV scale
+                    float(leaf.atlas_index),        # atlas index
+                    *leaf.base_color,               # color (RGBA)
+                    *leaf.color_variance,           # color variance (RGB)
+                    leaf.variance_amount,           # variance amount
+                ])
+            leaf_count += 1
+
+        self.leaf_count = leaf_count
+        if leaf_data:
+            data = array('f', leaf_data)
+            self.leaf_instance_vbo.orphan(len(data) * 4)
+            self.leaf_instance_vbo.write(data.tobytes())
+
+    def _upload_leaf_data_cpu(self):
+        """CPU fallback for leaf data when texture buffers are unavailable."""
+        if self.texture_buffer_supported:
+            return
+        leaf_data: List[float] = []
+        leaf_count = 0
+        branches = self.tree.branches
+        for leaf in self.tree.canopy_leaves:
+            if leaf_count >= self.max_leaves:
+                break
+            if leaf.branch_index < 0 or leaf.branch_index >= len(branches):
+                continue
+            branch = branches[leaf.branch_index]
+            base_x = branch.end_x + leaf.offset[0]
+            base_y = branch.end_y + leaf.offset[1]
+            base_z = branch.end_z + leaf.offset[2]
+            leaf_data.extend([
+                base_x, base_y, base_z, 0.0,
+                *leaf.axis_x,
+                *leaf.axis_y,
+                *leaf.axis_z,
+                *leaf.uv_offset,
+                *leaf.uv_scale,
+                float(leaf.atlas_index),
+                *leaf.base_color,
+                *leaf.color_variance,
+                leaf.variance_amount,
+            ])
+            leaf_count += 1
+        self.leaf_count = leaf_count
         if leaf_data:
             data = array('f', leaf_data)
             self.leaf_instance_vbo.orphan(len(data) * 4)
@@ -3035,7 +3270,7 @@ class OpenGLRenderer:
                 ],
             )
 
-            texture_buffer_supported = hasattr(self.ctx, "texture_buffer")
+            texture_buffer_supported = self.texture_buffer_supported
             if not texture_buffer_supported:
                 print("Shadow leaf rendering disabled: texture buffers not supported by this ModernGL context.")
                 self.leaf_shadow_program = None
@@ -3286,39 +3521,60 @@ class OpenGLRenderer:
             self.branch_program["u_glow"].value = 0.0
             self.branch_vao.render(instances=len(branch_instances) // 24)
 
-        leaf_required_uniforms = (
-            "u_branch_positions",
-            "u_view",
-            "u_proj",
-            "u_light_space",
-            "u_atlas_grid",
-            "u_alpha_cutoff",
-            "u_leaf_atlas",
-            "u_light_dir",
-            "u_light_color",
-            "u_camera_pos",
-            "u_fog_color",
-            "u_fog_density",
-            "u_canopy_center_y",
-            "u_canopy_half_height",
-            "u_debug_view",
-        )
-        branch_position_source = getattr(self, "branch_position_tex", None) or getattr(self, "branch_position_tbo", None)
+        if self.texture_buffer_supported:
+            leaf_required_uniforms = (
+                "u_branch_positions",
+                "u_view",
+                "u_proj",
+                "u_light_space",
+                "u_atlas_grid",
+                "u_alpha_cutoff",
+                "u_leaf_atlas",
+                "u_light_dir",
+                "u_light_color",
+                "u_camera_pos",
+                "u_fog_color",
+                "u_fog_density",
+                "u_canopy_center_y",
+                "u_canopy_half_height",
+                "u_debug_view",
+            )
+            branch_position_source = getattr(self, "branch_position_tex", None)
+        else:
+            leaf_required_uniforms = (
+                "u_view",
+                "u_proj",
+                "u_light_space",
+                "u_atlas_grid",
+                "u_alpha_cutoff",
+                "u_leaf_atlas",
+                "u_light_dir",
+                "u_light_color",
+                "u_camera_pos",
+                "u_fog_color",
+                "u_fog_density",
+                "u_canopy_center_y",
+                "u_canopy_half_height",
+                "u_debug_view",
+            )
+            branch_position_source = None
+            self._upload_leaf_data_cpu()
         leaf_ready = bool(
             self.leaf_count > 0
             and getattr(self, "leaf_program", None)
             and getattr(self, "leaf_vao", None)
             and getattr(self, "leaf_atlas", None)
-            and branch_position_source
+            and (branch_position_source if self.texture_buffer_supported else True)
             and all(name in self.leaf_program for name in leaf_required_uniforms)
         )
         if leaf_ready:
             # Disable blending for alpha cutout rendering (depth write ON, blending OFF)
             self.ctx.disable(moderngl.BLEND)
 
-            # Bind branch position TBO for GPU lookup
-            branch_position_source.use(location=4)
-            self.leaf_program["u_branch_positions"].value = 4
+            if self.texture_buffer_supported and branch_position_source:
+                # Bind branch position texture buffer for GPU lookup
+                branch_position_source.use(location=4)
+                self.leaf_program["u_branch_positions"].value = 4
             self.leaf_program["u_view"].write(view)
             self.leaf_program["u_proj"].write(proj)
             self.leaf_program["u_light_space"].write(light_space)
