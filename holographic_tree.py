@@ -2901,7 +2901,7 @@ class OpenGLRenderer:
         if sky_ready:
             self.sky_program["u_sky_top"].value = (0.18, 0.28, 0.5)
             self.sky_program["u_sky_bottom"].value = self.fog_color
-            self.sky_vao.render()
+            self.sky_vao.render(moderngl.TRIANGLE_STRIP)
         self.ctx.enable(moderngl.DEPTH_TEST)
 
         shadow_texel = (1.0 / self.shadow_size, 1.0 / self.shadow_size) if shadow_ready else None
