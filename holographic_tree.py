@@ -2559,7 +2559,7 @@ class OpenGLRenderer:
                         lit.g = clamp(lit.g + hue_shift, 0.0, 1.0);
 
                         float dist = length(v_world_pos - u_camera_pos);
-                        float fog = 1.0 - exp(-u_fog_density * dist * dist);
+                        float fog = 1.0 - exp(-u_fog_density * dist * 0.0015);
                         vec3 color = mix(lit, u_fog_color, clamp(fog, 0.0, 1.0));
 
                         if (u_debug_view != 0 || v_debug_view != 0) {
@@ -2903,7 +2903,8 @@ class OpenGLRenderer:
     def _upload_static_leaf_data(self):
         """Build and upload static leaf instance data once at initialization."""
         leaf_data: List[float] = []
-        for leaf in self.tree.canopy_leaves:
+        max_leaf_instances = min(len(self.tree.canopy_leaves), self.max_leaves)
+        for leaf in self.tree.canopy_leaves[:max_leaf_instances]:
             # Static data: branch_index, offset, axes, UV, color
             leaf_data.extend([
                 float(leaf.branch_index),      # branch index
@@ -2919,10 +2920,11 @@ class OpenGLRenderer:
                 leaf.variance_amount,           # variance amount
             ])
 
+        self.leaf_count = max_leaf_instances
         if leaf_data:
             data = array('f', leaf_data)
             self.leaf_instance_vbo.orphan(len(data) * 4)
-            self.leaf_instance_vbo.write(data)
+            self.leaf_instance_vbo.write(data.tobytes())
 
     def _init_shadow_rendering(self):
         """Initialize shadow mapping resources (depth map, shaders, and VAOs)."""
@@ -3534,6 +3536,8 @@ class HolographicWindow(pyglet.window.Window):
             self.close()
         elif symbol in (pyglet.window.key.R, pyglet.window.key.SPACE):
             self.tree.regenerate_tree()
+            if getattr(self, "renderer", None) and getattr(self.renderer, "initialized", False):
+                self.renderer._upload_static_leaf_data()
         elif symbol == pyglet.window.key._0:
             # Final with fog
             self.renderer.debug_view_mode = 0
