@@ -11,12 +11,50 @@ from array import array
 import math
 import random
 import time
+import sys
+import traceback
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple, Dict, Any
 
 import moderngl
 import pyglet
 import numpy as np
+
+def check_gl_error(gl, location: str) -> bool:
+    """Check for OpenGL errors and print them if found."""
+    error = gl.glGetError()
+    if error != gl.GL_NO_ERROR:
+        error_str = {
+            gl.GL_INVALID_ENUM: "GL_INVALID_ENUM",
+            gl.GL_INVALID_VALUE: "GL_INVALID_VALUE",
+            gl.GL_INVALID_OPERATION: "GL_INVALID_OPERATION",
+            gl.GL_OUT_OF_MEMORY: "GL_OUT_OF_MEMORY",
+        }.get(error, f"Unknown error ({error})")
+        print(f"OpenGL error at {location}: {error_str}")
+        return False
+    return True
+
+def print_shader_compile_log(shader, shader_type: str):
+    """Print shader compilation log if there are any messages."""
+    if shader is None:
+        print(f"Error: {shader_type} shader is None")
+        return
+    
+    log = shader.info_log
+    if log and log.strip():
+        print(f"{shader_type} shader log:")
+        print(log)
+
+def print_program_link_log(program):
+    """Print program link log if there are any messages."""
+    if program is None:
+        print("Error: Program is None")
+        return
+    
+    log = program.info_log
+    if log and log.strip():
+        print("Program link log:")
+        print(log)
 
 
 # ============================================================================
@@ -1226,7 +1264,186 @@ class HolographicTree:
         ]
 
 
+class DebugQuad:
+    """Simple debug quad for testing basic rendering."""
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.program = self.ctx.program(
+            vertex_shader="""
+                #version 120
+                attribute vec2 in_vert;
+                attribute vec2 in_uv;
+                varying vec2 v_uv;
+                void main() {
+                    gl_Position = vec4(in_vert, 0.0, 1.0);
+                    v_uv = in_uv;
+                }
+            """,
+            fragment_shader="""
+                #version 120
+                varying vec2 v_uv;
+                void main() {
+                    // Draw a simple gradient for visibility
+                    vec2 uv = v_uv * 2.0 - 1.0;
+                    float d = length(uv);
+                    float a = smoothstep(1.0, 0.9, d);
+                    gl_FragColor = vec4(0.2, 0.6, 1.0, 0.8) * a;
+                }
+            """
+        )
+        
+        # Vertex data for a fullscreen quad
+        vertices = np.array([
+            # x, y, u, v
+            -1, -1,  0, 0,
+             1, -1,  1, 0,
+            -1,  1,  0, 1,
+             1,  1,  1, 1,
+        ], dtype='f4')
+        
+        # Create a single buffer with interleaved vertex data
+        vbo = self.ctx.buffer(vertices)
+        
+        # Create the vertex array
+        self.vao = self.ctx.simple_vertex_array(
+            self.program,
+            vbo,
+            'in_vert',
+            'in_uv',
+        )  
+        
+    def render(self):
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func(moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
+        self.vao.render(moderngl.TRIANGLE_STRIP)
+
+
 class OpenGLRenderer:
+    def __init__(self, window, tree):
+        print("Initializing OpenGL renderer...")
+        # Basic properties
+        self.window = window
+        self.tree = tree
+        self.time = 0.0
+        self.initialized = False
+        self.debug_quad = None
+        
+        # Camera settings
+        self.camera_position = (tree.w * 0.5, tree.h * 0.5, 1600.0)  # Positioned to see the whole tree
+        self.camera_target = (tree.w * 0.5, tree.h * 0.48, 0.0)      # Slightly below center of tree
+        self.camera_up = (0.0, 1.0, 0.0)  # Y is up
+        self.fov = 40.0  # Field of view in degrees
+        
+        # Rendering settings
+        self.use_alpha_to_coverage = False
+        self.alpha_to_coverage_flag = getattr(moderngl, 'SAMPLE_ALPHA_TO_COVERAGE', None)
+        self.debug_view_mode = 0
+        self.leaf_count = 0
+        
+        # Lighting settings
+        self.light_direction = (0.5, -1.0, 0.5)  # Direction of the light source
+        self.light_color = (1.0, 0.9, 0.8)      # Warm white light
+        self.ambient_light = (0.2, 0.2, 0.2)    # Ambient light level
+        
+        # Rendering resources
+        self.ctx = None
+        self.branch_instance_vbo = None
+        self.leaf_instance_vbo = None
+        self.branch_vao = None
+        self.leaf_vao = None
+        self.branch_program = None
+        self.leaf_program = None
+        self.branch_shadow_program = None
+        self.leaf_shadow_program = None
+        self.textures = {}
+        self.max_branches = 100000  # Maximum number of branches to render
+        self.max_leaves = 200000    # Maximum number of leaves to render
+        
+        # Texture buffer objects for instanced rendering
+        self.branch_position_tbo = None
+        self.branch_direction_tbo = None
+        self.leaf_position_tbo = None
+        self.leaf_scale_tbo = None
+        
+        # Shadow mapping
+        self.shadow_size = 2048
+        self.shadow_fbo = None
+        self.shadow_map = None
+        self.shadow_bias = 0.001
+        self.shadow_light_pos = (0, 0, 0)
+        
+        # Debug and state tracking
+        self.draw_calls = 0
+        self.triangles_drawn = 0
+        self.last_frame_time = 0
+        self.frame_times = []
+        self.avg_frame_time = 0
+        
+        # Initialize the renderer
+        self._initialize_renderer()
+    
+    def _initialize_renderer(self):
+        """Initialize the OpenGL context and resources."""
+        try:
+            # Create OpenGL context
+            self.ctx = moderngl.create_context()
+            if not self.ctx:
+                raise RuntimeError("Failed to create OpenGL context")
+            
+            # Print OpenGL info
+            print("\n--- OpenGL Info ---")
+            print(f"Version: {self.ctx.version_code}")
+            
+            # Safely get OpenGL info with fallbacks
+            vendor = self.ctx.info.get('GL_VENDOR', 'Unknown')
+            renderer = self.ctx.info.get('GL_RENDERER', 'Unknown')
+            glsl_version = self.ctx.info.get('GL_SHADING_LANGUAGE_VERSION', 'Unknown')
+            
+            print(f"Vendor: {vendor}")
+            print(f"Renderer: {renderer}")
+            print(f"GLSL Version: {glsl_version}")
+            
+            # Print all available OpenGL info keys for debugging
+            print("\nAvailable OpenGL Info:")
+            for key in sorted(self.ctx.info.keys()):
+                print(f"- {key}")
+            print("------------------\n")
+            
+            # Initialize debug quad
+            self.debug_quad = DebugQuad(self.ctx)
+            
+            # Initialize rendering resources
+            try:
+                # Create texture buffers for instanced rendering
+                self.branch_position_tbo = self.ctx.buffer(reserve=self.max_branches * 16)  # vec4 per instance
+                self.branch_direction_tbo = self.ctx.buffer(reserve=self.max_branches * 16)  # vec4 per instance
+                self.leaf_position_tbo = self.ctx.buffer(reserve=self.max_leaves * 16)  # vec4 per instance
+                self.leaf_scale_tbo = self.ctx.buffer(reserve=self.max_leaves * 4)  # float per instance
+                
+                # Initialize shaders and buffers
+                self._init_branch_rendering()
+                self._init_leaf_rendering()
+                
+                # Initialize shadow mapping
+                self._init_shadow_mapping()
+                
+                # Load textures
+                self._load_textures()
+                
+                self.initialized = True
+                print("OpenGL renderer initialized successfully")
+                
+            except Exception as e:
+                print(f"Warning: Could not initialize rendering: {e}")
+                traceback.print_exc()
+                print("Trying to continue with limited functionality...")
+                self.initialized = False
+            
+        except Exception as e:
+            print(f"Error initializing OpenGL renderer: {e}")
+            traceback.print_exc()
+            self.initialized = False
+
     def _create_texture_from_array(self, data: np.ndarray, repeat=True, mipmaps=True) -> moderngl.Texture:
         """Create a moderngl texture from a numpy array."""
         if data.ndim == 2:
@@ -1689,15 +1906,291 @@ class OpenGLRenderer:
 
         return patches
 
-    def __init__(self, window: pyglet.window.Window, tree: HolographicTree):
+    def __init__(self, window, tree):
+        print("Initializing OpenGL renderer...")
         self.window = window
         self.tree = tree
-        self.ctx = moderngl.create_context()
-        self.ctx.enable(moderngl.BLEND)
-        self.ctx.enable(moderngl.DEPTH_TEST)
-        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-        self.alpha_to_coverage_flag = getattr(moderngl, "SAMPLE_ALPHA_TO_COVERAGE", None)
-        self.use_alpha_to_coverage = self.ctx.fbo.samples > 1 and self.alpha_to_coverage_flag is not None
+        self.time = 0.0
+        self.initialized = False
+        self.debug_quad = None
+        
+        # Initialize camera with default values
+        self.camera_position = (tree.w * 0.5, tree.h * 0.5, 1600.0)  # Positioned to see the whole tree
+        self.camera_target = (tree.w * 0.5, tree.h * 0.48, 0.0)      # Slightly below center of tree
+        self.camera_up = (0.0, 1.0, 0.0)  # Y is up
+        
+        # Camera settings
+        self.fov = 40.0  # Field of view in degrees
+        
+        # Lighting settings
+        self.light_direction = (0.5, -1.0, 0.5)  # Direction of the light source
+        self.light_color = (1.0, 0.9, 0.8)      # Warm white light
+        self.ambient_light = (0.2, 0.2, 0.2)    # Ambient light level
+        
+        # Rendering state
+        self.branch_instance_vbo = None
+        self.leaf_instance_vbo = None
+        self.branch_vao = None
+        self.leaf_vao = None
+        self.branch_program = None
+        self.leaf_program = None
+        self.textures = {}
+        self.initialized = False
+        
+        # Texture buffer objects for instanced rendering
+        self.branch_position_tbo = None
+        self.branch_direction_tbo = None
+        self.leaf_position_tbo = None
+        self.leaf_scale_tbo = None
+        
+        # Rendering limits
+        self.max_branches = 100000  # Maximum number of branches to render
+        self.max_leaves = 200000    # Maximum number of leaves to render
+        
+        try:
+            # Initialize ModernGL context
+            self.ctx = moderngl.create_context()
+            if not self.ctx:
+                raise RuntimeError("Failed to create OpenGL context")
+            
+            # Print OpenGL info
+            print("\n--- OpenGL Info ---")
+            print(f"Version: {self.ctx.version_code}")
+            
+            # Safely get OpenGL info with fallbacks
+            vendor = self.ctx.info.get('GL_VENDOR', 'Unknown')
+            renderer = self.ctx.info.get('GL_RENDERER', 'Unknown')
+            glsl_version = self.ctx.info.get('GL_SHADING_LANGUAGE_VERSION', 'Unknown')
+            
+            print(f"Vendor: {vendor}")
+            print(f"Renderer: {renderer}")
+            print(f"GLSL Version: {glsl_version}")
+            
+            # Print all available OpenGL info keys for debugging
+            print("\nAvailable OpenGL Info:")
+            for key in sorted(self.ctx.info.keys()):
+                print(f"- {key}")
+            print("------------------\n")
+            
+            # Initialize rendering resources
+            try:
+                # Create texture buffers for instanced rendering
+                self.branch_position_tbo = self.ctx.buffer(reserve=self.max_branches * 16)  # vec4 per instance
+                self.branch_direction_tbo = self.ctx.buffer(reserve=self.max_branches * 16)  # vec4 per instance
+                self.leaf_position_tbo = self.ctx.buffer(reserve=self.max_leaves * 16)      # vec4 per instance
+                self.leaf_scale_tbo = self.ctx.buffer(reserve=self.max_leaves * 4)         # float per instance
+                
+                self._init_branch_rendering()
+                self._init_leaf_rendering()
+                self.initialized = True
+                print("OpenGL renderer initialized successfully")
+            except Exception as e:
+                print(f"Warning: Could not initialize rendering: {e}")
+                traceback.print_exc()
+                print("Trying to continue with limited functionality...")
+                self.initialized = False
+            
+        except Exception as e:
+            print(f"Error initializing OpenGL renderer: {e}")
+            traceback.print_exc()
+            raise
+
+    def _look_at(self, eye, target, up):
+        """Create a view matrix looking from eye to target."""
+        forward = np.array(target) - np.array(eye)
+        forward = forward / np.linalg.norm(forward)
+        
+        right = np.cross(forward, up)
+        right = right / np.linalg.norm(right)
+        
+        new_up = np.cross(right, forward)
+        
+        # Create rotation matrix
+        rot = np.eye(4)
+        rot[0, :3] = right
+        rot[1, :3] = new_up
+        rot[2, :3] = -forward
+        
+        # Create translation matrix
+        trans = np.eye(4)
+        trans[:3, 3] = -np.array(eye)
+        
+        return (rot @ trans).T.flatten().tolist()
+    
+    def _perspective(self, fov, aspect, near, far):
+        """Create a perspective projection matrix."""
+        f = 1.0 / math.tan(math.radians(fov) / 2.0)
+        range_inv = 1.0 / (near - far)
+        
+        return [
+            f / aspect, 0, 0, 0,
+            0, f, 0, 0,
+            0, 0, (near + far) * range_inv, -1,
+            0, 0, near * far * range_inv * 2, 0
+        ]
+    
+    def set_camera(self, position, target, up=None):
+        """Set the camera position, target and up vector."""
+        self.camera_position = position
+        self.camera_target = target
+        if up is not None:
+            self.camera_up = up
+    
+    def _init_branch_rendering(self):
+        """Initialize shaders and buffers for branch rendering."""
+        try:
+            # Simple branch shader
+            self.branch_program = self.ctx.program(
+                vertex_shader="""
+                    #version 120
+                    attribute vec3 in_position;
+                    uniform mat4 u_mvp;
+                    varying vec3 v_color;
+                    
+                    void main() {
+                        gl_Position = u_mvp * vec4(in_position, 1.0);
+                        v_color = vec3(0.5, 0.3, 0.1);  // Brown color for branches
+                    }
+                """,
+                fragment_shader="""
+                    #version 120
+                    varying vec3 v_color;
+                    
+                    void main() {
+                        gl_FragColor = vec4(v_color, 1.0);
+                    }
+                """
+            )
+            
+            # Create a simple branch segment (a line)
+            branch_vertices = np.array([
+                0.0, 0.0, 0.0,  # Start point
+                0.0, 1.0, 0.0   # End point (upwards)
+            ], dtype='f4')
+            
+            # Create VBO for branch vertices
+            branch_vbo = self.ctx.buffer(branch_vertices.tobytes())
+            
+            # Create VAO for branches
+            self.branch_vao = self.ctx.vertex_array(
+                self.branch_program,
+                [
+                    (branch_vbo, '3f', 'in_position')
+                ]
+            )
+            
+            # Create instance VBO (will be updated each frame)
+            self.branch_instance_vbo = self.ctx.buffer(reserve=1024*1024)  # 1MB initial size
+            
+        except Exception as e:
+            print(f"Error initializing branch rendering: {e}")
+            traceback.print_exc()
+            raise
+    
+    def _init_leaf_rendering(self):
+        """Initialize shaders and buffers for leaf rendering."""
+        try:
+            # Simple leaf shader
+            self.leaf_program = self.ctx.program(
+                vertex_shader="""
+                    #version 120
+                    attribute vec2 in_position;
+                    attribute vec3 in_instance_pos;
+                    attribute float in_instance_scale;
+                    uniform mat4 u_mvp;
+                    varying vec2 v_uv;
+                    
+                    void main() {
+                        vec4 pos = u_mvp * vec4(in_instance_pos, 1.0);
+                        pos.xy += in_position.xy * in_instance_scale * 0.1;
+                        gl_Position = pos;
+                        v_uv = in_position * 0.5 + 0.5;
+                    }
+                """,
+                fragment_shader="""
+                    #version 120
+                    varying vec2 v_uv;
+                    
+                    void main() {
+                        float r = length(v_uv - 0.5);
+                        float alpha = smoothstep(0.5, 0.45, r);
+                        if (alpha < 0.1) discard;
+                        gl_FragColor = vec4(0.2, 0.8, 0.3, alpha);  // Green color for leaves
+                    }
+                """
+            )
+            
+            # Create a simple quad for leaves
+            leaf_vertices = np.array([
+                -1, -1,  # bottom-left
+                 1, -1,  # bottom-right
+                -1,  1,  # top-left
+                 1,  1,  # top-right
+            ], dtype='f4')
+            
+            # Create VBO for leaf vertices
+            leaf_vbo = self.ctx.buffer(leaf_vertices.tobytes())
+            
+            # Create VAO for leaves
+            self.leaf_vao = self.ctx.vertex_array(
+                self.leaf_program,
+                [
+                    (leaf_vbo, '2f', 'in_position')
+                ]
+            )
+            
+            # Create instance VBO (will be updated each frame)
+            self.leaf_instance_vbo = self.ctx.buffer(reserve=1024*1024)  # 1MB initial size
+            
+        except Exception as e:
+            print(f"Error initializing leaf rendering: {e}")
+            traceback.print_exc()
+            raise
+    
+    def _update_branch_buffers(self, positions):
+        """Update branch vertex buffer with new positions."""
+        if not hasattr(self, 'branch_instance_vbo') or not self.branch_instance_vbo:
+            return 0
+            
+        # Convert positions to numpy array if needed
+        if not isinstance(positions, np.ndarray):
+            positions = np.array(positions, dtype='f4')
+            
+        # Limit the number of branches to render
+        num_branches = min(len(positions) // 3, self.max_branches)
+        if num_branches == 0:
+            return 0
+            
+        # Update the VBO with new positions
+        self.branch_instance_vbo.orphan()
+        self.branch_instance_vbo.write(positions[:num_branches * 3].tobytes())
+        return num_branches
+        
+    def render(self):
+        if not hasattr(self, 'ctx') or not self.ctx or not self.initialized:
+            print("Error: OpenGL context not properly initialized")
+            return
+            
+        try:
+            # Clear with a distinctive color to verify the clear is working
+            self.ctx.clear(0.2, 0.1, 0.15, 1.0)
+            
+            # Basic OpenGL state
+            self.ctx.enable(moderngl.DEPTH_TEST)
+            self.ctx.enable(moderngl.BLEND)
+            self.ctx.blend_func(moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
+            self.ctx.point_size = 2.0
+            
+            # Render debug quad if available
+            if hasattr(self, 'debug_quad') and self.debug_quad:
+                self.debug_quad.render()
+                
+            # Check for OpenGL errors
+            check_gl_error(self.ctx, "after render")
+            
+        except Exception as e:
+            print(f"Error in render: {e}")
+            traceback.print_exc()
 
         # Debug view mode: 0=final with fog, 1=albedo only, 2=normals only, 3=final no fog
         self.debug_view_mode = 0  # Final with fog for atmospheric depth
@@ -2907,7 +3400,7 @@ class OpenGLRenderer:
         if branch_positions:
             branch_count = min(len(branch_positions) // 3, self.max_branches)
             data = array('f', branch_positions[:branch_count * 3])
-            self.branch_position_tbo.write(data.tobytes(), viewport=(0, 0, branch_count, 1))
+            self.branch_position_tbo.write(data.tobytes())
 
         # Alpha-to-coverage for leaves (if available)
         if self.use_alpha_to_coverage:
@@ -3074,16 +3567,39 @@ class HolographicWindow(pyglet.window.Window):
     def __init__(self):
         display = pyglet.display.get_display()
         screen = display.get_default_screen()
-        config = pyglet.gl.Config(double_buffer=True, sample_buffers=1, samples=4)
-        super().__init__(
-            width=screen.width,
-            height=screen.height,
-            fullscreen=True,
-            caption="Holographic Tree",
-            config=config,
-            vsync=False,
-        )
-        self.set_mouse_visible(False)
+        
+        # Try to create a window with multisampling, fallback to basic config if not supported
+        try:
+            config = pyglet.gl.Config(
+                double_buffer=True,
+                sample_buffers=1,
+                samples=4,
+                depth_size=24,
+                stencil_size=8
+            )
+            super().__init__(
+                width=min(1280, screen.width - 100),
+                height=min(800, screen.height - 100),
+                fullscreen=False,  # Start in windowed mode
+                caption="Holographic Tree",
+                config=config,
+                vsync=True,  # Enable vsync for smoother rendering
+                resizable=True
+            )
+        except pyglet.window.NoSuchConfigException:
+            print("Warning: Multisampling not supported, falling back to basic config")
+            config = pyglet.gl.Config(double_buffer=True, depth_size=24)
+            super().__init__(
+                width=min(1280, screen.width - 100),
+                height=min(800, screen.height - 100),
+                fullscreen=False,
+                caption="Holographic Tree",
+                config=config,
+                vsync=True,
+                resizable=True
+            )
+            
+        self.set_mouse_visible(True)  # Make mouse visible for easier window management
 
         self.tree = HolographicTree(self.width, self.height)
         self.renderer = OpenGLRenderer(self, self.tree)
@@ -3226,8 +3742,15 @@ class HolographicWindow(pyglet.window.Window):
 
 
 def main():
-    window = HolographicWindow()
-    pyglet.app.run()
+    try:
+        window = HolographicWindow()
+        print("Window created successfully. Press ESC to exit.")
+        pyglet.app.run()
+    except Exception as e:
+        print(f"Error initializing application: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        input("Press Enter to exit...")
 
 
 if __name__ == "__main__":
