@@ -1842,10 +1842,14 @@ class OpenGLRenderer:
         self.leaf_instance_vbo = None
         self.branch_vao = None
         self.leaf_vao = None
+        self.branch_vbo = None
+        self.leaf_vbo = None
         self.branch_program = None
         self.leaf_program = None
         self.branch_shadow_program = None
         self.leaf_shadow_program = None
+        self.branch_shadow_vao = None
+        self.leaf_shadow_vao = None
         self.textures = {}
         self.initialized = False
 
@@ -1854,6 +1858,7 @@ class OpenGLRenderer:
         self.branch_direction_tbo = None
         self.leaf_position_tbo = None
         self.leaf_scale_tbo = None
+        self.branch_position_tex = None
 
         # Rendering limits
         self.max_branches = 100000  # Maximum number of branches to render
@@ -1908,6 +1913,7 @@ class OpenGLRenderer:
                 
                 self._init_branch_rendering()
                 self._init_leaf_rendering()
+                self._init_shadow_rendering()
                 self.initialized = True
                 print("OpenGL renderer initialized successfully")
             except Exception as e:
@@ -1996,6 +2002,7 @@ class OpenGLRenderer:
             
             # Create VBO for branch vertices
             branch_vbo = self.ctx.buffer(branch_vertices.tobytes())
+            self.branch_vbo = branch_vbo
             
             # Create VAO for branches
             self.branch_vao = self.ctx.vertex_array(
@@ -2056,6 +2063,7 @@ class OpenGLRenderer:
             
             # Create VBO for leaf vertices
             leaf_vbo = self.ctx.buffer(leaf_vertices.tobytes())
+            self.leaf_vbo = leaf_vbo
             
             # Create VAO for leaves
             self.leaf_vao = self.ctx.vertex_array(
@@ -2116,6 +2124,149 @@ class OpenGLRenderer:
             self.leaf_instance_vbo.orphan(len(data) * 4)
             self.leaf_instance_vbo.write(data)
 
+    def _init_shadow_rendering(self):
+        """Initialize shadow mapping resources (depth map, shaders, and VAOs)."""
+        try:
+            self.shadow_map = self.ctx.depth_texture((self.shadow_size, self.shadow_size))
+            # Use hardware depth comparisons where available
+            self.shadow_map.compare_func = "<="
+            self.shadow_map.filter = (moderngl.NEAREST, moderngl.NEAREST)
+            self.shadow_fbo = self.ctx.framebuffer(depth_attachment=self.shadow_map)
+
+            if not self.branch_vbo or not self.leaf_vbo:
+                raise RuntimeError("Branch/leaf vertex buffers must be initialized before shadows")
+
+            self.branch_shadow_program = self.ctx.program(
+                vertex_shader="""
+                    #version 330
+                    uniform mat4 u_light_space;
+                    in vec3 in_position;
+                    in vec4 in_model_0;
+                    in vec4 in_model_1;
+                    in vec4 in_model_2;
+                    in vec4 in_model_3;
+
+                    void main() {
+                        mat4 model = mat4(in_model_0, in_model_1, in_model_2, in_model_3);
+                        gl_Position = u_light_space * model * vec4(in_position, 1.0);
+                    }
+                """,
+                fragment_shader="""
+                    #version 330
+                    void main() {
+                        // Depth is written automatically to the shadow map
+                    }
+                """,
+            )
+
+            self.leaf_shadow_program = self.ctx.program(
+                vertex_shader="""
+                    #version 330
+                    uniform mat4 u_light_space;
+                    uniform samplerBuffer u_branch_positions;
+                    uniform vec2 u_atlas_grid;
+                    uniform float u_alpha_cutoff;
+
+                    in vec2 in_position;
+                    in float in_branch_index;
+                    in vec3 in_offset;
+                    in vec3 in_axis_x;
+                    in vec3 in_axis_y;
+                    in vec3 in_axis_z;
+                    in vec2 in_uv_offset;
+                    in vec2 in_uv_scale;
+                    in float in_atlas_index;
+
+                    out vec2 v_uv;
+                    flat out float v_alpha_cutoff;
+
+                    vec3 fetch_branch_pos(int idx) {
+                        return texelFetch(u_branch_positions, idx).xyz;
+                    }
+
+                    void main() {
+                        int branch_idx = int(in_branch_index + 0.5);
+                        vec3 branch_pos = fetch_branch_pos(branch_idx);
+                        vec3 local = in_axis_x * in_position.x + in_axis_y * in_position.y;
+                        vec3 world_pos = branch_pos + in_offset + local;
+
+                        vec2 base_uv = in_position * 0.5 + 0.5;
+                        float atlas_cols = max(u_atlas_grid.x, 1.0);
+                        float atlas_rows = max(u_atlas_grid.y, 1.0);
+                        float atlas_idx = max(in_atlas_index, 0.0);
+                        float col = mod(atlas_idx, atlas_cols);
+                        float row = floor(atlas_idx / atlas_cols);
+                        vec2 atlas_origin = vec2(col, row) / vec2(atlas_cols, atlas_rows);
+                        vec2 atlas_scale = vec2(1.0 / atlas_cols, 1.0 / atlas_rows);
+                        v_uv = atlas_origin + (in_uv_offset + base_uv * in_uv_scale) * atlas_scale;
+                        v_alpha_cutoff = u_alpha_cutoff;
+
+                        gl_Position = u_light_space * vec4(world_pos, 1.0);
+                    }
+                """,
+                fragment_shader="""
+                    #version 330
+                    uniform sampler2D u_leaf_atlas;
+                    in vec2 v_uv;
+                    flat in float v_alpha_cutoff;
+
+                    void main() {
+                        float alpha = texture(u_leaf_atlas, v_uv).a;
+                        if (alpha < v_alpha_cutoff) {
+                            discard;
+                        }
+                    }
+                """,
+            )
+
+            self.branch_shadow_vao = self.ctx.vertex_array(
+                self.branch_shadow_program,
+                [
+                    (self.branch_vbo, "3f", "in_position"),
+                    (
+                        self.branch_instance_vbo,
+                        "16f 8x /i",
+                        "in_model_0",
+                        "in_model_1",
+                        "in_model_2",
+                        "in_model_3",
+                    ),
+                ],
+            )
+
+            self.leaf_shadow_vao = self.ctx.vertex_array(
+                self.leaf_shadow_program,
+                [
+                    (self.leaf_vbo, "2f", "in_position"),
+                    (
+                        self.leaf_instance_vbo,
+                        "1f 3f 3f 3f 3f 2f 2f 1f 8x /i",
+                        "in_branch_index",
+                        "in_offset",
+                        "in_axis_x",
+                        "in_axis_y",
+                        "in_axis_z",
+                        "in_uv_offset",
+                        "in_uv_scale",
+                        "in_atlas_index",
+                    ),
+                ],
+            )
+
+            # Texture buffer for branch positions (vec4 per branch)
+            self.branch_position_tex = self.ctx.texture_buffer(self.branch_position_tbo, components=4, dtype="f4")
+
+        except Exception as e:
+            print(f"Warning: Could not initialize shadow rendering: {e}")
+            traceback.print_exc()
+            self.shadow_fbo = None
+            self.shadow_map = None
+            self.branch_shadow_program = None
+            self.leaf_shadow_program = None
+            self.branch_shadow_vao = None
+            self.leaf_shadow_vao = None
+            self.branch_position_tex = None
+
     def render(self):
         width, height = self.window.get_framebuffer_size()
         aspect = width / max(height, 1)
@@ -2151,11 +2302,11 @@ class OpenGLRenderer:
         # GPU-driven: Update branch positions only (not all leaf data!)
         branch_positions: List[float] = []
         for branch in self.tree.branches:
-            branch_positions.extend([branch.end_x, branch.end_y, branch.end_z])
+            branch_positions.extend([branch.end_x, branch.end_y, branch.end_z, 1.0])
 
         if branch_positions:
-            branch_count = min(len(branch_positions) // 3, self.max_branches)
-            data = array('f', branch_positions[:branch_count * 3])
+            branch_count = min(len(branch_positions) // 4, self.max_branches)
+            data = array('f', branch_positions[:branch_count * 4])
             self.branch_position_tbo.write(data.tobytes())
 
         # Alpha-to-coverage for leaves (if available)
@@ -2165,22 +2316,36 @@ class OpenGLRenderer:
             if self.alpha_to_coverage_flag is not None:
                 self.ctx.disable(self.alpha_to_coverage_flag)
 
-        self.shadow_fbo.use()
-        self.ctx.viewport = (0, 0, self.shadow_size, self.shadow_size)
-        self.ctx.clear(depth=1.0)
-        if branch_instances:
-            self.branch_shadow_program["u_light_space"].write(light_space)
-            self.branch_shadow_vao.render(instances=len(branch_instances) // 24)
-        if self.leaf_count > 0:
-            # Bind branch position TBO for GPU lookup
-            self.branch_position_tbo.use(location=4)
-            self.leaf_shadow_program["u_branch_positions"].value = 4
-            self.leaf_shadow_program["u_light_space"].write(light_space)
-            self.leaf_shadow_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
-            self.leaf_shadow_program["u_alpha_cutoff"].value = 0.2
-            self.leaf_atlas.use(location=0)
-            self.leaf_shadow_program["u_leaf_atlas"].value = 0
-            self.leaf_shadow_vao.render(instances=self.leaf_count)
+        shadow_ready = bool(
+            self.shadow_fbo
+            and self.shadow_map
+            and self.branch_shadow_program
+            and self.branch_shadow_vao
+        )
+        leaf_shadow_ready = bool(
+            shadow_ready
+            and self.leaf_shadow_program
+            and self.leaf_shadow_vao
+            and self.branch_position_tex
+        )
+
+        if shadow_ready:
+            self.shadow_fbo.use()
+            self.ctx.viewport = (0, 0, self.shadow_size, self.shadow_size)
+            self.ctx.clear(depth=1.0)
+            if branch_instances:
+                self.branch_shadow_program["u_light_space"].write(light_space)
+                self.branch_shadow_vao.render(instances=len(branch_instances) // 24)
+            if self.leaf_count > 0 and leaf_shadow_ready:
+                # Bind branch position texture buffer for GPU lookup
+                self.branch_position_tex.use(location=4)
+                self.leaf_shadow_program["u_branch_positions"].value = 4
+                self.leaf_shadow_program["u_light_space"].write(light_space)
+                self.leaf_shadow_program["u_atlas_grid"].value = (self.tree.leaf_atlas_cols, self.tree.leaf_atlas_rows)
+                self.leaf_shadow_program["u_alpha_cutoff"].value = 0.2
+                self.leaf_atlas.use(location=0)
+                self.leaf_shadow_program["u_leaf_atlas"].value = 0
+                self.leaf_shadow_vao.render(instances=self.leaf_count)
         # Grass shadows disabled for performance (grass doesn't need to cast shadows)
         # self.ground_shadow_program["u_light_space"].write(light_space)
         # for patch in self.grass_patches:
@@ -2197,8 +2362,9 @@ class OpenGLRenderer:
         self.sky_vao.render()
         self.ctx.enable(moderngl.DEPTH_TEST)
 
-        self.shadow_map.use(location=3)
-        shadow_texel = (1.0 / self.shadow_size, 1.0 / self.shadow_size)
+        shadow_texel = (1.0 / self.shadow_size, 1.0 / self.shadow_size) if shadow_ready else None
+        if shadow_ready:
+            self.shadow_map.use(location=3)
 
         # Bind grass texture for ground
         self.grass_albedo.use(location=0)
@@ -2207,8 +2373,9 @@ class OpenGLRenderer:
         self.ground_program["u_view"].write(view)
         self.ground_program["u_proj"].write(proj)
         self.ground_program["u_light_space"].write(light_space)
-        self.ground_program["u_shadow_map"].value = 3
-        self.ground_program["u_shadow_texel"].value = shadow_texel
+        if shadow_ready:
+            self.ground_program["u_shadow_map"].value = 3
+            self.ground_program["u_shadow_texel"].value = shadow_texel
         self.ground_program["u_light_dir"].value = self.light_direction
         self.ground_program["u_light_color"].value = self.light_color
         self.ground_program["u_camera_pos"].value = self.camera_position
@@ -2238,8 +2405,9 @@ class OpenGLRenderer:
             self.branch_program["u_bark_albedo"].value = 0
             self.branch_program["u_bark_normal"].value = 1
             self.branch_program["u_bark_roughness"].value = 2
-            self.branch_program["u_shadow_map"].value = 3
-            self.branch_program["u_shadow_texel"].value = shadow_texel
+            if shadow_ready:
+                self.branch_program["u_shadow_map"].value = 3
+                self.branch_program["u_shadow_texel"].value = shadow_texel
             self.branch_program["u_light_dir"].value = self.light_direction
             self.branch_program["u_light_color"].value = self.light_color
             self.branch_program["u_fog_color"].value = self.fog_color
@@ -2254,7 +2422,8 @@ class OpenGLRenderer:
             self.ctx.disable(moderngl.BLEND)
 
             # Bind branch position TBO for GPU lookup
-            self.branch_position_tbo.use(location=4)
+            branch_position_source = self.branch_position_tex or self.branch_position_tbo
+            branch_position_source.use(location=4)
             self.leaf_program["u_branch_positions"].value = 4
             self.leaf_program["u_view"].write(view)
             self.leaf_program["u_proj"].write(proj)
@@ -2263,8 +2432,9 @@ class OpenGLRenderer:
             self.leaf_program["u_alpha_cutoff"].value = 0.2
             self.leaf_atlas.use(location=0)
             self.leaf_program["u_leaf_atlas"].value = 0
-            self.leaf_program["u_shadow_map"].value = 3
-            self.leaf_program["u_shadow_texel"].value = shadow_texel
+            if shadow_ready:
+                self.leaf_program["u_shadow_map"].value = 3
+                self.leaf_program["u_shadow_texel"].value = shadow_texel
             self.leaf_program["u_light_dir"].value = self.light_direction
             self.leaf_program["u_light_color"].value = self.light_color
             self.leaf_program["u_camera_pos"].value = self.camera_position
