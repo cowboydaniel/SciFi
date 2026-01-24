@@ -2892,6 +2892,7 @@ class OpenGLRenderer:
         self.ctx.viewport = (0, 0, width, height)
         self.ctx.clear(0.015, 0.05, 0.11, depth=1.0)
         self.ctx.disable(moderngl.DEPTH_TEST)
+        self.ctx.depth_mask = False
         sky_ready = bool(
             getattr(self, "sky_program", None)
             and getattr(self, "sky_vao", None)
@@ -2902,6 +2903,7 @@ class OpenGLRenderer:
             self.sky_program["u_sky_top"].value = (0.18, 0.28, 0.5)
             self.sky_program["u_sky_bottom"].value = self.fog_color
             self.sky_vao.render(moderngl.TRIANGLE_STRIP)
+        self.ctx.depth_mask = True
         self.ctx.enable(moderngl.DEPTH_TEST)
 
         shadow_texel = (1.0 / self.shadow_size, 1.0 / self.shadow_size) if shadow_ready else None
