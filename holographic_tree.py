@@ -1861,9 +1861,12 @@ class OpenGLRenderer:
         self.leaf_shadow_vao = None
         self.sky_program = None
         self.sky_vao = None
+        self.sky_vbo = None
         self.grass_albedo = None
         self.ground_program = None
+        self.grass_vbo = None
         self.grass_patches: List[Dict[str, Any]] = []
+        self.texture_buffer_supported = False
         self.bark_albedo = None
         self.bark_normal = None
         self.bark_roughness = None
@@ -1890,6 +1893,8 @@ class OpenGLRenderer:
         # Rendering limits
         self.max_branches = 100000  # Maximum number of branches to render
         self.max_leaves = 200000    # Maximum number of leaves to render
+        self.max_leaves_cpu = self.max_leaves
+        self.max_grass_blades_cpu = 500000
 
         # Shadow mapping
         self.shadow_size = 2048
@@ -1932,6 +1937,8 @@ class OpenGLRenderer:
 
             # Feature flags
             self.texture_buffer_supported = hasattr(self.ctx, "texture_buffer")
+            self.max_leaves_cpu = 60000
+            self.max_grass_blades_cpu = 200000
             
             # Initialize rendering resources
             try:
@@ -2397,6 +2404,7 @@ class OpenGLRenderer:
 
                         in vec2 in_position;
                         in vec3 in_world_base_pos;
+                        in float in_world_pad;
                         in vec3 in_axis_x;
                         in vec3 in_axis_y;
                         in vec3 in_axis_z;
@@ -2540,8 +2548,9 @@ class OpenGLRenderer:
                         (self.leaf_vbo, "2f", "in_position"),
                         (
                             self.leaf_instance_vbo,
-                            "3f 1x 3f 3f 3f 2f 2f 1f 4f 3f 1f /i",
+                            "3f 1f 3f 3f 3f 2f 2f 1f 4f 3f 1f /i",
                             "in_world_base_pos",
+                            "in_world_pad",
                             "in_axis_x",
                             "in_axis_y",
                             "in_axis_z",
@@ -2564,6 +2573,7 @@ class OpenGLRenderer:
         """Initialize sky rendering resources."""
         self.sky_program = None
         self.sky_vao = None
+        self.sky_vbo = None
         try:
             self.sky_program = self.ctx.program(
                 vertex_shader="""
@@ -2595,16 +2605,17 @@ class OpenGLRenderer:
                 [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
                 dtype="f4",
             )
-            sky_vbo = self.ctx.buffer(sky_vertices.tobytes())
+            self.sky_vbo = self.ctx.buffer(sky_vertices.tobytes())
             self.sky_vao = self.ctx.vertex_array(
                 self.sky_program,
-                [(sky_vbo, "2f", "in_position")],
+                [(self.sky_vbo, "2f", "in_position")],
             )
         except Exception as e:
             print(f"Warning: Could not initialize sky rendering: {e}")
             traceback.print_exc()
             self.sky_program = None
             self.sky_vao = None
+            self.sky_vbo = None
 
     def _init_ground_rendering(self):
         """Initialize ground rendering resources."""
@@ -2752,11 +2763,12 @@ class OpenGLRenderer:
                 self.ground_program["u_shadow_texel"].value = (0.0, 0.0)
 
             grass_mesh = np.array(self._build_grass_blade_mesh(), dtype="f4")
-            grass_vbo = self.ctx.buffer(grass_mesh.tobytes())
+            self.grass_vbo = self.ctx.buffer(grass_mesh.tobytes())
 
+            grass_blade_count = 500000 if self.texture_buffer_supported else self.max_grass_blades_cpu
             patches = self._build_grass_instance_data_patches(
                 area_size=2000.0,
-                num_blades=500000,
+                num_blades=grass_blade_count,
                 seed=self.tree.seed + 29,
                 center_x=self.tree.root_x,
                 grid_size=20,
@@ -2773,7 +2785,7 @@ class OpenGLRenderer:
                 patch["vao"] = self.ctx.vertex_array(
                     self.ground_program,
                     [
-                        (grass_vbo, "3f 3f 2f", "in_position", "in_normal", "in_uv"),
+                        (self.grass_vbo, "3f 3f 2f", "in_position", "in_normal", "in_uv"),
                         (
                             instance_vbo,
                             "3f 1f 1f 1f 2f /i",
@@ -2792,6 +2804,7 @@ class OpenGLRenderer:
             traceback.print_exc()
             self.grass_albedo = None
             self.ground_program = None
+            self.grass_vbo = None
             self.grass_patches = []
 
     def _init_bark_textures(self):
@@ -3077,9 +3090,10 @@ class OpenGLRenderer:
     def _upload_static_leaf_data(self):
         """Build and upload static leaf instance data once at initialization."""
         leaf_data: List[float] = []
+        leaf_limit = self.max_leaves if self.texture_buffer_supported else min(self.max_leaves, self.max_leaves_cpu)
         leaf_count = 0
         for leaf in self.tree.canopy_leaves:
-            if leaf_count >= self.max_leaves:
+            if leaf_count >= leaf_limit:
                 break
             if leaf.branch_index < 0 or leaf.branch_index >= len(self.tree.branches):
                 continue
@@ -3129,10 +3143,11 @@ class OpenGLRenderer:
         if self.texture_buffer_supported:
             return
         leaf_data: List[float] = []
+        leaf_limit = min(self.max_leaves, self.max_leaves_cpu)
         leaf_count = 0
         branches = self.tree.branches
         for leaf in self.tree.canopy_leaves:
-            if leaf_count >= self.max_leaves:
+            if leaf_count >= leaf_limit:
                 break
             if leaf.branch_index < 0 or leaf.branch_index >= len(branches):
                 continue
