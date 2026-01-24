@@ -2693,7 +2693,6 @@ class OpenGLRenderer:
                     in vec3 in_offset;
                     in vec3 in_axis_x;
                     in vec3 in_axis_y;
-                    in vec3 in_axis_z;
                     in vec2 in_uv_offset;
                     in vec2 in_uv_scale;
                     in float in_atlas_index;
@@ -2761,12 +2760,11 @@ class OpenGLRenderer:
                     (self.leaf_vbo, "2f", "in_position"),
                     (
                         self.leaf_instance_vbo,
-                        "1f 3f 3f 3f 3f 2f 2f 1f 8x /i",
+                        "1f 3f 3f 3f 12x 2f 2f 1f 8x /i",
                         "in_branch_index",
                         "in_offset",
                         "in_axis_x",
                         "in_axis_y",
-                        "in_axis_z",
                         "in_uv_offset",
                         "in_uv_scale",
                         "in_atlas_index",
