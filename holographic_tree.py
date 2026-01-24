@@ -2761,6 +2761,14 @@ class OpenGLRenderer:
                 ],
             )
 
+            texture_buffer_supported = hasattr(self.ctx, "texture_buffer")
+            if not texture_buffer_supported:
+                print("Shadow leaf rendering disabled: texture buffers not supported by this ModernGL context.")
+                self.leaf_shadow_program = None
+                self.leaf_shadow_vao = None
+                self.branch_position_tex = None
+                return
+
             self.leaf_shadow_vao = self.ctx.vertex_array(
                 self.leaf_shadow_program,
                 [
