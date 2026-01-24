@@ -16,6 +16,13 @@ import traceback
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
+import os
+
+# Force NVIDIA PRIME offload for OpenGL (must be set before GL libs are loaded)
+os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
+os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+os.environ.setdefault("__VK_LAYER_NV_optimus", "NVIDIA_only")
+
 import moderngl
 import pyglet
 import numpy as np
