@@ -573,6 +573,8 @@ class HolographicTree:
     def __init__(self, width: int, height: int):
         self.w = width
         self.h = height
+        # Seed used by renderer-side procedural textures and terrain noise
+        self.seed = random.randrange(0, 2**31 - 1)
         self.time = 0.0
         self.flicker = 1.0
         self.flicker_pulse = 0.0
@@ -2744,7 +2746,7 @@ class OpenGLRenderer:
                     (self.branch_vbo, "3f", "in_position"),
                     (
                         self.branch_instance_vbo,
-                        "16f 8x /i",
+                        "4f 4f 4f 4f 32x /i",
                         "in_model_0",
                         "in_model_1",
                         "in_model_2",
