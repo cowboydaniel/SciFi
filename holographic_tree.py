@@ -1390,7 +1390,7 @@ class OpenGLRenderer:
         )
 
     @staticmethod
-    def _perspective(fov_y: float, aspect: float, near: float, far: float) -> tuple[float, ...]:
+    def _perspective_radians(fov_y: float, aspect: float, near: float, far: float) -> tuple[float, ...]:
         f = 1.0 / math.tan(fov_y / 2.0)
         nf = 1.0 / (near - far)
         return (
@@ -2805,7 +2805,7 @@ class OpenGLRenderer:
         width, height = self.window.get_framebuffer_size()
         aspect = width / max(height, 1)
         view = array('f', self._look_at(self.camera_position, self.camera_target, self.camera_up))
-        proj = array('f', self._perspective(math.radians(40.0), aspect, 10.0, 2000.0))
+        proj = array('f', self._perspective(self.fov, aspect, 10.0, 2000.0))
         light_target = (self.tree.w * 0.5, self.tree.h * 0.4, 0.0)
         light_dir = self.light_direction
         light_distance = 1200.0
