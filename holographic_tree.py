@@ -2397,7 +2397,6 @@ class OpenGLRenderer:
 
                         in vec2 in_position;
                         in vec3 in_world_base_pos;
-                        in float in_world_pad;
                         in vec3 in_axis_x;
                         in vec3 in_axis_y;
                         in vec3 in_axis_z;
@@ -2541,9 +2540,8 @@ class OpenGLRenderer:
                         (self.leaf_vbo, "2f", "in_position"),
                         (
                             self.leaf_instance_vbo,
-                            "3f 1f 3f 3f 3f 2f 2f 1f 4f 3f 1f /i",
+                            "3f 1x 3f 3f 3f 2f 2f 1f 4f 3f 1f /i",
                             "in_world_base_pos",
-                            "in_world_pad",
                             "in_axis_x",
                             "in_axis_y",
                             "in_axis_z",
