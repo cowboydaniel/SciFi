@@ -1850,6 +1850,24 @@ class OpenGLRenderer:
         self.leaf_shadow_program = None
         self.branch_shadow_vao = None
         self.leaf_shadow_vao = None
+        self.sky_program = None
+        self.sky_vao = None
+        self.grass_albedo = None
+        self.ground_program = None
+        self.grass_patches: List[Dict[str, Any]] = []
+        self.bark_albedo = None
+        self.bark_normal = None
+        self.bark_roughness = None
+        self.has_bark_normal = False
+        self.has_bark_roughness = False
+        self.leaf_atlas = None
+        self.bird_instance_vbo = None
+        self.bird_program = None
+        self.bird_sprite = None
+        self.bird_vao = None
+        self.ui_line_instance_vbo = None
+        self.ui_line_program = None
+        self.ui_line_vao = None
         self.textures = {}
         self.initialized = False
 
@@ -1913,6 +1931,12 @@ class OpenGLRenderer:
                 
                 self._init_branch_rendering()
                 self._init_leaf_rendering()
+                self._init_sky_rendering()
+                self._init_ground_rendering()
+                self._init_bark_textures()
+                self._init_leaf_atlas()
+                self._init_bird_rendering()
+                self._init_ui_rendering()
                 self._init_shadow_rendering()
                 self.initialized = True
                 print("OpenGL renderer initialized successfully")
@@ -2080,6 +2104,501 @@ class OpenGLRenderer:
             print(f"Error initializing leaf rendering: {e}")
             traceback.print_exc()
             raise
+
+    def _init_sky_rendering(self):
+        """Initialize sky rendering resources."""
+        self.sky_program = None
+        self.sky_vao = None
+        try:
+            self.sky_program = self.ctx.program(
+                vertex_shader="""
+                    #version 330
+                    in vec2 in_position;
+                    out vec2 v_uv;
+
+                    void main() {
+                        v_uv = in_position * 0.5 + 0.5;
+                        gl_Position = vec4(in_position, 0.0, 1.0);
+                    }
+                """,
+                fragment_shader="""
+                    #version 330
+                    uniform vec3 u_sky_top;
+                    uniform vec3 u_sky_bottom;
+                    in vec2 v_uv;
+                    out vec4 f_color;
+
+                    void main() {
+                        float t = clamp(v_uv.y, 0.0, 1.0);
+                        vec3 sky = mix(u_sky_bottom, u_sky_top, t);
+                        f_color = vec4(sky, 1.0);
+                    }
+                """,
+            )
+
+            sky_vertices = np.array(
+                [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+                dtype="f4",
+            )
+            sky_vbo = self.ctx.buffer(sky_vertices.tobytes())
+            self.sky_vao = self.ctx.vertex_array(
+                self.sky_program,
+                [(sky_vbo, "2f", "in_position")],
+            )
+        except Exception as e:
+            print(f"Warning: Could not initialize sky rendering: {e}")
+            traceback.print_exc()
+            self.sky_program = None
+            self.sky_vao = None
+
+    def _init_ground_rendering(self):
+        """Initialize ground rendering resources."""
+        self.grass_albedo = None
+        self.ground_program = None
+        self.grass_patches = []
+        try:
+            grass_albedo = generate_grass_albedo(size=512, seed=self.tree.seed + 11)
+            self.grass_albedo = self._create_texture_from_array(grass_albedo, repeat=True, mipmaps=True)
+
+            self.ground_program = self.ctx.program(
+                vertex_shader="""
+                    #version 330
+                    uniform mat4 u_view;
+                    uniform mat4 u_proj;
+                    uniform mat4 u_light_space;
+                    uniform vec3 u_light_dir;
+                    uniform vec3 u_light_color;
+                    uniform vec3 u_camera_pos;
+                    uniform vec3 u_fog_color;
+                    uniform float u_fog_density;
+                    uniform vec2 u_tree_center;
+                    uniform int u_debug_view;
+                    uniform float u_time;
+
+                    in vec3 in_position;
+                    in vec3 in_normal;
+                    in vec2 in_uv;
+
+                    in vec3 in_instance_pos;
+                    in float in_instance_rot;
+                    in float in_instance_height;
+                    in float in_instance_width;
+                    in vec2 in_instance_lean;
+
+                    out vec2 v_uv;
+                    out vec3 v_normal;
+                    out vec3 v_world_pos;
+                    out vec4 v_light_pos;
+                    flat out int v_debug_view;
+
+                    mat3 rot_y(float angle) {
+                        float c = cos(angle);
+                        float s = sin(angle);
+                        return mat3(
+                            c, 0.0, -s,
+                            0.0, 1.0, 0.0,
+                            s, 0.0, c
+                        );
+                    }
+
+                    void main() {
+                        vec3 local = in_position;
+                        local.x *= in_instance_width;
+                        local.y *= in_instance_height;
+
+                        float sway_phase = (in_instance_pos.x - u_tree_center.x) * 0.01 + u_time;
+                        float sway = sin(sway_phase) * 0.35 * local.y;
+                        local.x += sway + in_instance_lean.x * local.y;
+                        local.z += in_instance_lean.y * local.y;
+
+                        mat3 rot = rot_y(in_instance_rot);
+                        vec3 world_pos = rot * local + in_instance_pos;
+                        vec3 world_normal = normalize(rot * in_normal);
+
+                        v_uv = in_uv;
+                        v_normal = world_normal + normalize(u_light_dir) * 0.0001;
+                        v_world_pos = world_pos + normalize(u_camera_pos) * 0.0001;
+                        v_light_pos = u_light_space * vec4(world_pos, 1.0);
+                        v_debug_view = u_debug_view;
+
+                        gl_Position = u_proj * u_view * vec4(world_pos, 1.0);
+                    }
+                """,
+                fragment_shader="""
+                    #version 330
+                    uniform sampler2D u_grass_albedo;
+                    uniform sampler2DShadow u_shadow_map;
+                    uniform vec2 u_shadow_texel;
+                    uniform vec3 u_light_dir;
+                    uniform vec3 u_light_color;
+                    uniform vec3 u_camera_pos;
+                    uniform vec3 u_fog_color;
+                    uniform float u_fog_density;
+                    uniform vec2 u_tree_center;
+                    uniform int u_debug_view;
+                    uniform float u_time;
+
+                    in vec2 v_uv;
+                    in vec3 v_normal;
+                    in vec3 v_world_pos;
+                    in vec4 v_light_pos;
+                    flat in int v_debug_view;
+                    out vec4 f_color;
+
+                    float compute_shadow(vec4 light_pos) {
+                        if (u_shadow_texel.x <= 0.0 || u_shadow_texel.y <= 0.0) {
+                            return 1.0;
+                        }
+
+                        vec3 proj = light_pos.xyz / max(light_pos.w, 0.0001);
+                        vec3 shadow_coord = proj * 0.5 + 0.5;
+                        if (shadow_coord.z > 1.0) {
+                            return 1.0;
+                        }
+
+                        vec2 jitter = vec2(
+                            sin(v_world_pos.x * 0.01 + u_time),
+                            cos(v_world_pos.z * 0.01 + u_time)
+                        ) * u_shadow_texel * 1.5;
+                        vec3 sample_coord = vec3(shadow_coord.xy + jitter, shadow_coord.z - 0.001);
+                        return texture(u_shadow_map, sample_coord);
+                    }
+
+                    void main() {
+                        vec3 albedo = texture(u_grass_albedo, v_uv * 4.0).rgb;
+                        vec3 normal = normalize(v_normal);
+                        vec3 light_dir = normalize(-u_light_dir);
+                        float ndotl = max(dot(normal, light_dir), 0.0);
+                        float shadow = compute_shadow(v_light_pos);
+                        float lighting = (0.25 + ndotl * 0.75) * shadow;
+                        vec3 lit = albedo * (lighting * u_light_color);
+
+                        float tree_dist = length(v_world_pos.xz - u_tree_center);
+                        float hue_shift = sin(tree_dist * 0.02 + u_time) * 0.04;
+                        lit.g = clamp(lit.g + hue_shift, 0.0, 1.0);
+
+                        float dist = length(v_world_pos - u_camera_pos);
+                        float fog = 1.0 - exp(-u_fog_density * dist * dist);
+                        vec3 color = mix(lit, u_fog_color, clamp(fog, 0.0, 1.0));
+
+                        if (u_debug_view != 0 || v_debug_view != 0) {
+                            color = mix(color, normal * 0.5 + 0.5, 0.6);
+                        }
+
+                        f_color = vec4(color, 1.0);
+                    }
+                """,
+            )
+
+            # Provide safe defaults when shadows are unavailable
+            if "u_shadow_map" in self.ground_program:
+                self.ground_program["u_shadow_map"].value = 0
+            if "u_shadow_texel" in self.ground_program:
+                self.ground_program["u_shadow_texel"].value = (0.0, 0.0)
+
+            grass_mesh = np.array(self._build_grass_blade_mesh(), dtype="f4")
+            grass_vbo = self.ctx.buffer(grass_mesh.tobytes())
+
+            patches = self._build_grass_instance_data_patches(
+                area_size=2000.0,
+                num_blades=500000,
+                seed=self.tree.seed + 29,
+                center_x=self.tree.root_x,
+                grid_size=20,
+            )
+
+            for patch in patches:
+                instance_count = int(patch.get("instance_count", 0))
+                patch["instance_count"] = instance_count
+                if instance_count <= 0:
+                    continue
+                instance_data = np.array(patch["instance_data"], dtype="f4")
+                instance_vbo = self.ctx.buffer(instance_data.tobytes())
+                patch["instance_vbo"] = instance_vbo
+                patch["vao"] = self.ctx.vertex_array(
+                    self.ground_program,
+                    [
+                        (grass_vbo, "3f 3f 2f", "in_position", "in_normal", "in_uv"),
+                        (
+                            instance_vbo,
+                            "3f 1f 1f 1f 2f /i",
+                            "in_instance_pos",
+                            "in_instance_rot",
+                            "in_instance_height",
+                            "in_instance_width",
+                            "in_instance_lean",
+                        ),
+                    ],
+                )
+
+            self.grass_patches = patches
+        except Exception as e:
+            print(f"Warning: Could not initialize ground rendering: {e}")
+            traceback.print_exc()
+            self.grass_albedo = None
+            self.ground_program = None
+            self.grass_patches = []
+
+    def _init_bark_textures(self):
+        """Initialize bark textures and availability flags."""
+        self.bark_albedo = None
+        self.bark_normal = None
+        self.bark_roughness = None
+        self.has_bark_normal = False
+        self.has_bark_roughness = False
+        try:
+            bark_albedo = generate_bark_albedo(size=256, seed=self.tree.seed + 3)
+            bark_normal = generate_bark_normal(size=256, seed=self.tree.seed + 5)
+            bark_roughness = generate_bark_roughness(size=256, seed=self.tree.seed + 7)
+
+            self.bark_albedo = self._create_texture_from_array(bark_albedo, repeat=True, mipmaps=True)
+            self.bark_normal = self._create_texture_from_array(bark_normal, repeat=True, mipmaps=True)
+            self.bark_roughness = self._create_texture_from_array(bark_roughness, repeat=True, mipmaps=True)
+            self.has_bark_normal = self.bark_normal is not None
+            self.has_bark_roughness = self.bark_roughness is not None
+        except Exception as e:
+            print(f"Warning: Could not initialize bark textures: {e}")
+            traceback.print_exc()
+            self.bark_albedo = None
+            self.bark_normal = None
+            self.bark_roughness = None
+            self.has_bark_normal = False
+            self.has_bark_roughness = False
+
+    def _init_leaf_atlas(self):
+        """Initialize the procedural leaf atlas texture."""
+        self.leaf_atlas = None
+        try:
+            cols = max(1, int(self.tree.leaf_atlas_cols))
+            rows = max(1, int(self.tree.leaf_atlas_rows))
+            cell_size = 128
+            atlas = np.zeros((rows * cell_size, cols * cell_size, 4), dtype=np.uint8)
+            variant = 0
+            for row in range(rows):
+                for col in range(cols):
+                    leaf = generate_leaf_rgba(size=cell_size, seed=self.tree.seed + 101, variant=variant)
+                    y0 = row * cell_size
+                    y1 = y0 + cell_size
+                    x0 = col * cell_size
+                    x1 = x0 + cell_size
+                    atlas[y0:y1, x0:x1, :] = leaf
+                    variant += 1
+
+            self.leaf_atlas = self._create_texture_from_array(atlas, repeat=False, mipmaps=True)
+        except Exception as e:
+            print(f"Warning: Could not initialize leaf atlas: {e}")
+            traceback.print_exc()
+            self.leaf_atlas = None
+
+    def _init_bird_rendering(self):
+        """Initialize bird sprite rendering resources."""
+        self.bird_instance_vbo = None
+        self.bird_program = None
+        self.bird_sprite = None
+        self.bird_vao = None
+        try:
+            sprite_size = 64
+            cols = max(1, int(self.tree.bird_sprite_cols))
+            rows = max(1, int(self.tree.bird_sprite_rows))
+            atlas = np.zeros((rows * sprite_size, cols * sprite_size, 4), dtype=np.uint8)
+
+            yy, xx = np.mgrid[0:sprite_size, 0:sprite_size].astype(np.float32)
+            uv_x = (xx / max(sprite_size - 1, 1)) * 2.0 - 1.0
+            uv_y = (yy / max(sprite_size - 1, 1)) * 2.0 - 1.0
+
+            frame_count = cols * rows
+            for frame in range(frame_count):
+                flap = math.sin((frame / max(frame_count, 1)) * math.tau)
+                body = np.clip(1.0 - (uv_x * uv_x + (uv_y * 1.2) ** 2), 0.0, 1.0)
+                wing = np.clip(1.0 - ((uv_x * (1.4 + 0.3 * flap)) ** 2 + (uv_y * 0.8) ** 2), 0.0, 1.0)
+                beak = np.clip(1.0 - ((uv_x - 0.55) ** 2 * 12.0 + (uv_y + 0.05) ** 2 * 40.0), 0.0, 1.0)
+
+                alpha = np.clip(body * 0.9 + wing * 0.7 + beak * 0.8, 0.0, 1.0)
+                color = np.zeros((sprite_size, sprite_size, 4), dtype=np.uint8)
+                color[..., 0] = np.clip((0.2 + wing * 0.4 + beak * 0.8) * 255, 0, 255).astype(np.uint8)
+                color[..., 1] = np.clip((0.6 + body * 0.35 + wing * 0.2) * 255, 0, 255).astype(np.uint8)
+                color[..., 2] = np.clip((0.85 + body * 0.1) * 255, 0, 255).astype(np.uint8)
+                color[..., 3] = np.clip(alpha * 255, 0, 255).astype(np.uint8)
+
+                row = frame // cols
+                col = frame % cols
+                y0 = row * sprite_size
+                y1 = y0 + sprite_size
+                x0 = col * sprite_size
+                x1 = x0 + sprite_size
+                atlas[y0:y1, x0:x1, :] = color
+
+            self.bird_sprite = self._create_texture_from_array(atlas, repeat=False, mipmaps=True)
+
+            self.bird_program = self.ctx.program(
+                vertex_shader="""
+                    #version 330
+                    uniform vec2 u_resolution;
+                    uniform vec2 u_sprite_grid;
+
+                    in vec2 in_position;
+                    in vec2 in_center;
+                    in float in_size;
+                    in float in_facing;
+                    in float in_flap;
+                    in vec2 in_uv_offset;
+                    in vec2 in_uv_scale;
+                    in float in_frame_index;
+                    in vec4 in_body_color;
+                    in vec4 in_wing_color;
+                    in vec4 in_beak_color;
+
+                    out vec2 v_uv;
+                    out vec4 v_color;
+                    flat out float v_flap;
+
+                    void main() {
+                        vec2 scaled = in_position * in_size;
+                        scaled.x *= in_facing;
+                        vec2 world = in_center + scaled;
+                        vec2 ndc = (world / max(u_resolution, vec2(1.0))) * 2.0 - 1.0;
+                        gl_Position = vec4(ndc, 0.0, 1.0);
+
+                        vec2 base_uv = in_uv_offset + (in_position * 0.5 + 0.5) * in_uv_scale;
+                        float cols = max(u_sprite_grid.x, 1.0);
+                        float rows = max(u_sprite_grid.y, 1.0);
+                        float idx = mod(in_frame_index, cols * rows);
+                        float col = mod(idx, cols);
+                        float row = floor(idx / cols);
+                        vec2 tile_origin = vec2(col, row) / vec2(cols, rows);
+                        vec2 tile_scale = vec2(1.0 / cols, 1.0 / rows);
+                        v_uv = tile_origin + base_uv * tile_scale;
+
+                        float wing_mix = clamp(abs(in_position.y) * (0.5 + 0.5 * abs(in_flap)), 0.0, 1.0);
+                        v_color = mix(in_body_color, in_wing_color, wing_mix);
+                        v_color.rgb = mix(v_color.rgb, in_beak_color.rgb, step(0.35, in_position.x) * step(0.1, in_position.y));
+                        v_color.a *= in_beak_color.a;
+                        v_flap = in_flap;
+                    }
+                """,
+                fragment_shader="""
+                    #version 330
+                    uniform sampler2D u_bird_sprite;
+                    uniform vec2 u_resolution;
+                    uniform vec2 u_sprite_grid;
+                    uniform float u_alpha_cutoff;
+
+                    in vec2 v_uv;
+                    in vec4 v_color;
+                    flat in float v_flap;
+                    out vec4 f_color;
+
+                    void main() {
+                        vec4 tex = texture(u_bird_sprite, v_uv);
+                        float alpha = tex.a * v_color.a * (0.9 + 0.1 * abs(v_flap));
+                        if (alpha < u_alpha_cutoff) {
+                            discard;
+                        }
+                        vec3 color = tex.rgb * v_color.rgb;
+                        color += vec3(u_sprite_grid.x, u_sprite_grid.y, u_resolution.x / max(u_resolution.y, 1.0)) * 0.00001;
+                        f_color = vec4(color, alpha);
+                    }
+                """,
+            )
+
+            bird_quad = np.array([-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype="f4")
+            bird_vbo = self.ctx.buffer(bird_quad.tobytes())
+            self.bird_instance_vbo = self.ctx.buffer(reserve=22 * 4)
+            self.bird_vao = self.ctx.vertex_array(
+                self.bird_program,
+                [
+                    (bird_vbo, "2f", "in_position"),
+                    (
+                        self.bird_instance_vbo,
+                        "2f 1f 1f 1f 2f 2f 1f 4f 4f 4f /i",
+                        "in_center",
+                        "in_size",
+                        "in_facing",
+                        "in_flap",
+                        "in_uv_offset",
+                        "in_uv_scale",
+                        "in_frame_index",
+                        "in_body_color",
+                        "in_wing_color",
+                        "in_beak_color",
+                    ),
+                ],
+            )
+        except Exception as e:
+            print(f"Warning: Could not initialize bird rendering: {e}")
+            traceback.print_exc()
+            self.bird_instance_vbo = None
+            self.bird_program = None
+            self.bird_sprite = None
+            self.bird_vao = None
+
+    def _init_ui_rendering(self):
+        """Initialize UI line rendering resources."""
+        self.ui_line_instance_vbo = None
+        self.ui_line_program = None
+        self.ui_line_vao = None
+        try:
+            self.ui_line_program = self.ctx.program(
+                vertex_shader="""
+                    #version 330
+                    uniform vec2 u_resolution;
+
+                    in vec2 in_corner;
+                    in vec2 in_start;
+                    in vec2 in_end;
+                    in float in_width;
+                    in vec4 in_color;
+
+                    out vec4 v_color;
+
+                    void main() {
+                        vec2 dir = in_end - in_start;
+                        float len = length(dir);
+                        vec2 dir_n = len > 0.0001 ? dir / len : vec2(1.0, 0.0);
+                        vec2 normal = vec2(-dir_n.y, dir_n.x);
+
+                        vec2 center = (in_start + in_end) * 0.5;
+                        vec2 offset = dir_n * (in_corner.x * len * 0.5) + normal * (in_corner.y * in_width * 0.5);
+                        vec2 world = center + offset;
+                        vec2 ndc = (world / max(u_resolution, vec2(1.0))) * 2.0 - 1.0;
+                        gl_Position = vec4(ndc, 0.0, 1.0);
+                        v_color = in_color;
+                    }
+                """,
+                fragment_shader="""
+                    #version 330
+                    in vec4 v_color;
+                    out vec4 f_color;
+
+                    void main() {
+                        f_color = v_color;
+                    }
+                """,
+            )
+
+            ui_corners = np.array([-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype="f4")
+            ui_corner_vbo = self.ctx.buffer(ui_corners.tobytes())
+            self.ui_line_instance_vbo = self.ctx.buffer(reserve=9 * 4 * 8)
+            self.ui_line_vao = self.ctx.vertex_array(
+                self.ui_line_program,
+                [
+                    (ui_corner_vbo, "2f", "in_corner"),
+                    (
+                        self.ui_line_instance_vbo,
+                        "2f 2f 1f 4f /i",
+                        "in_start",
+                        "in_end",
+                        "in_width",
+                        "in_color",
+                    ),
+                ],
+            )
+        except Exception as e:
+            print(f"Warning: Could not initialize UI rendering: {e}")
+            traceback.print_exc()
+            self.ui_line_instance_vbo = None
+            self.ui_line_program = None
+            self.ui_line_vao = None
     
     def _update_branch_buffers(self, positions):
         """Update branch vertex buffer with new positions."""
@@ -2327,6 +2846,7 @@ class OpenGLRenderer:
             and self.leaf_shadow_program
             and self.leaf_shadow_vao
             and self.branch_position_tex
+            and self.leaf_atlas
         )
 
         if shadow_ready:
@@ -2357,41 +2877,99 @@ class OpenGLRenderer:
         self.ctx.viewport = (0, 0, width, height)
         self.ctx.clear(0.015, 0.05, 0.11, depth=1.0)
         self.ctx.disable(moderngl.DEPTH_TEST)
-        self.sky_program["u_sky_top"].value = (0.18, 0.28, 0.5)
-        self.sky_program["u_sky_bottom"].value = self.fog_color
-        self.sky_vao.render()
+        sky_ready = bool(
+            getattr(self, "sky_program", None)
+            and getattr(self, "sky_vao", None)
+            and "u_sky_top" in self.sky_program
+            and "u_sky_bottom" in self.sky_program
+        )
+        if sky_ready:
+            self.sky_program["u_sky_top"].value = (0.18, 0.28, 0.5)
+            self.sky_program["u_sky_bottom"].value = self.fog_color
+            self.sky_vao.render()
         self.ctx.enable(moderngl.DEPTH_TEST)
 
         shadow_texel = (1.0 / self.shadow_size, 1.0 / self.shadow_size) if shadow_ready else None
         if shadow_ready:
             self.shadow_map.use(location=3)
 
-        # Bind grass texture for ground
-        self.grass_albedo.use(location=0)
+        ground_required_uniforms = (
+            "u_grass_albedo",
+            "u_view",
+            "u_proj",
+            "u_light_space",
+            "u_light_dir",
+            "u_light_color",
+            "u_camera_pos",
+            "u_fog_color",
+            "u_fog_density",
+            "u_tree_center",
+            "u_debug_view",
+            "u_time",
+        )
+        ground_ready = bool(
+            getattr(self, "grass_albedo", None)
+            and getattr(self, "ground_program", None)
+            and getattr(self, "grass_patches", None) is not None
+            and all(name in self.ground_program for name in ground_required_uniforms)
+        )
+        if ground_ready:
+            # Bind grass texture for ground
+            self.grass_albedo.use(location=0)
 
-        self.ground_program["u_grass_albedo"].value = 0
-        self.ground_program["u_view"].write(view)
-        self.ground_program["u_proj"].write(proj)
-        self.ground_program["u_light_space"].write(light_space)
-        if shadow_ready:
-            self.ground_program["u_shadow_map"].value = 3
-            self.ground_program["u_shadow_texel"].value = shadow_texel
-        self.ground_program["u_light_dir"].value = self.light_direction
-        self.ground_program["u_light_color"].value = self.light_color
-        self.ground_program["u_camera_pos"].value = self.camera_position
-        self.ground_program["u_fog_color"].value = self.fog_color
-        self.ground_program["u_fog_density"].value = self.fog_density
-        self.ground_program["u_tree_center"].value = (self.tree.root_x, self.tree.root_y)
-        self.ground_program["u_debug_view"].value = self.debug_view_mode
-        self.ground_program["u_time"].value = self.tree.time
+            self.ground_program["u_grass_albedo"].value = 0
+            self.ground_program["u_view"].write(view)
+            self.ground_program["u_proj"].write(proj)
+            self.ground_program["u_light_space"].write(light_space)
+            if shadow_ready and "u_shadow_map" in self.ground_program and "u_shadow_texel" in self.ground_program:
+                self.ground_program["u_shadow_map"].value = 3
+                self.ground_program["u_shadow_texel"].value = shadow_texel
+            self.ground_program["u_light_dir"].value = self.light_direction
+            self.ground_program["u_light_color"].value = self.light_color
+            self.ground_program["u_camera_pos"].value = self.camera_position
+            self.ground_program["u_fog_color"].value = self.fog_color
+            self.ground_program["u_fog_density"].value = self.fog_density
+            self.ground_program["u_tree_center"].value = (self.tree.root_x, self.tree.root_y)
+            self.ground_program["u_debug_view"].value = self.debug_view_mode
+            self.ground_program["u_time"].value = self.tree.time
 
-        # Render grass patches with frustum culling
-        for patch in self.grass_patches:
-            min_x, min_z, max_x, max_z = patch['bounds']
-            if self._aabb_in_frustum(frustum_planes, min_x, min_z, max_x, max_z):
-                patch['vao'].render(instances=patch['instance_count'])
+            # Render grass patches with frustum culling
+            for patch in self.grass_patches:
+                vao = patch.get("vao")
+                instance_count = int(patch.get("instance_count", 0))
+                if not vao or instance_count <= 0:
+                    continue
+                min_x, min_z, max_x, max_z = patch["bounds"]
+                if self._aabb_in_frustum(frustum_planes, min_x, min_z, max_x, max_z):
+                    vao.render(instances=instance_count)
 
-        if branch_instances:
+        branch_required_uniforms = (
+            "u_view",
+            "u_proj",
+            "u_light_space",
+            "u_camera_pos",
+            "u_bark_uv_scale",
+            "u_has_normal",
+            "u_has_roughness",
+            "u_bark_albedo",
+            "u_bark_normal",
+            "u_bark_roughness",
+            "u_light_dir",
+            "u_light_color",
+            "u_fog_color",
+            "u_fog_density",
+            "u_debug_view",
+            "u_glow",
+        )
+        bark_ready = bool(getattr(self, "bark_albedo", None) and getattr(self, "bark_normal", None) and getattr(self, "bark_roughness", None))
+        branch_ready = bool(
+            branch_instances
+            and getattr(self, "branch_program", None)
+            and getattr(self, "branch_vao", None)
+            and bark_ready
+            and all(name in self.branch_program for name in branch_required_uniforms)
+        )
+        if branch_ready:
             self.branch_program["u_view"].write(view)
             self.branch_program["u_proj"].write(proj)
             self.branch_program["u_light_space"].write(light_space)
@@ -2417,12 +2995,37 @@ class OpenGLRenderer:
             self.branch_program["u_glow"].value = 0.0
             self.branch_vao.render(instances=len(branch_instances) // 24)
 
-        if self.leaf_count > 0:
+        leaf_required_uniforms = (
+            "u_branch_positions",
+            "u_view",
+            "u_proj",
+            "u_light_space",
+            "u_atlas_grid",
+            "u_alpha_cutoff",
+            "u_leaf_atlas",
+            "u_light_dir",
+            "u_light_color",
+            "u_camera_pos",
+            "u_fog_color",
+            "u_fog_density",
+            "u_canopy_center_y",
+            "u_canopy_half_height",
+            "u_debug_view",
+        )
+        branch_position_source = getattr(self, "branch_position_tex", None) or getattr(self, "branch_position_tbo", None)
+        leaf_ready = bool(
+            self.leaf_count > 0
+            and getattr(self, "leaf_program", None)
+            and getattr(self, "leaf_vao", None)
+            and getattr(self, "leaf_atlas", None)
+            and branch_position_source
+            and all(name in self.leaf_program for name in leaf_required_uniforms)
+        )
+        if leaf_ready:
             # Disable blending for alpha cutout rendering (depth write ON, blending OFF)
             self.ctx.disable(moderngl.BLEND)
 
             # Bind branch position TBO for GPU lookup
-            branch_position_source = self.branch_position_tex or self.branch_position_tbo
             branch_position_source.use(location=4)
             self.leaf_program["u_branch_positions"].value = 4
             self.leaf_program["u_view"].write(view)
@@ -2452,7 +3055,16 @@ class OpenGLRenderer:
 
         self.ctx.disable(moderngl.DEPTH_TEST)
         bird_instances = self.tree.build_bird_instances()
-        if bird_instances:
+        bird_required_uniforms = ("u_resolution", "u_sprite_grid", "u_alpha_cutoff", "u_bird_sprite")
+        bird_ready = bool(
+            bird_instances
+            and getattr(self, "bird_instance_vbo", None)
+            and getattr(self, "bird_program", None)
+            and getattr(self, "bird_sprite", None)
+            and getattr(self, "bird_vao", None)
+            and all(name in self.bird_program for name in bird_required_uniforms)
+        )
+        if bird_ready:
             data = array('f', bird_instances)
             self.bird_instance_vbo.orphan(len(data) * 4)
             self.bird_instance_vbo.write(data)
@@ -2482,11 +3094,19 @@ class OpenGLRenderer:
         ui_instances = []
         for x1, y1, x2, y2 in ui_lines:
             ui_instances.extend([x1, y1, x2, y2, 2.0, *ui_color])
-        data = array('f', ui_instances)
-        self.ui_line_instance_vbo.orphan(len(data) * 4)
-        self.ui_line_instance_vbo.write(data)
-        self.ui_line_program["u_resolution"].value = (width, height)
-        self.ui_line_vao.render(instances=len(ui_instances) // 9)
+        ui_ready = bool(
+            ui_instances
+            and getattr(self, "ui_line_instance_vbo", None)
+            and getattr(self, "ui_line_program", None)
+            and getattr(self, "ui_line_vao", None)
+            and "u_resolution" in self.ui_line_program
+        )
+        if ui_ready:
+            data = array('f', ui_instances)
+            self.ui_line_instance_vbo.orphan(len(data) * 4)
+            self.ui_line_instance_vbo.write(data)
+            self.ui_line_program["u_resolution"].value = (width, height)
+            self.ui_line_vao.render(instances=len(ui_instances) // 9)
 
 
 class HolographicWindow(pyglet.window.Window):
